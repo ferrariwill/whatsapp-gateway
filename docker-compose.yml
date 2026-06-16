@@ -1,0 +1,49 @@
+services:
+  postgres-local:
+    image: postgres:16-alpine
+    container_name: whatsapp-gateway-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: whatsapp_gateway
+    ports:
+      # Host 5433 → container 5432 (evita conflito com Postgres local na 5432)
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d whatsapp_gateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  whatsapp-gateway:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: whatsapp-gateway-app
+    restart: unless-stopped
+    depends_on:
+      postgres-local:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      COOKIE_SECURE: "false"
+      META_API_VERSION: "v21.0"
+      TEMPLATES_DIR: "/app/templates"
+      JWT_SECRET: "local-dev-jwt-secret-min-32-chars!!"
+      META_GLOBAL_TOKEN: ""
+      META_WABA_ID: ""
+      META_WEBHOOK_VERIFY_TOKEN: "local-meta-verify-token"
+      MOTHER_SYSTEM_WEBHOOK_URL: ""
+      DATABASE_URL: "postgresql://gateway:gateway@postgres-local:5432/whatsapp_gateway?sslmode=disable"
+    env_file:
+      - path: .env
+        required: false
+
+volumes:
+  postgres_data:

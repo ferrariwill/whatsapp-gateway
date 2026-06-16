@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS message_logs;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS systems;

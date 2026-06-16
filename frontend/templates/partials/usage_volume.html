@@ -1,0 +1,53 @@
+{{define "usage_volume.html"}}
+<div class="space-y-5">
+  <div class="flex flex-wrap gap-4">
+    <div class="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+      <p class="text-xs text-slate-500">Total de disparos (todas as aplicações)</p>
+      <p class="text-2xl font-semibold text-white">{{.TotalSent}}</p>
+      <p class="text-xs text-slate-500">{{printf "%02d" .Month}}/{{.Year}}</p>
+    </div>
+    <div class="rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3">
+      <p class="text-xs text-slate-500">Limite mensal por cliente externo</p>
+      <p class="text-2xl font-semibold text-emerald-300">{{.MonthlyLimit}}</p>
+      <p class="text-xs text-slate-500">Proteção contra abuso</p>
+    </div>
+  </div>
+
+  {{if .HasData}}
+  <div class="space-y-4">
+    {{range .Clients}}
+    <div class="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+      <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p class="font-medium text-white">{{.DisplayLabel}}</p>
+          <p class="text-xs text-slate-500">Aplicação: {{.SystemName}} · Cliente externo #{{.ExternalClientID}}</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <span class="rounded-full bg-slate-800 px-2.5 py-1 text-slate-300">Enviadas: <strong class="text-white">{{.TotalMessagesSent}}</strong></span>
+          <span class="rounded-full bg-blue-500/10 px-2.5 py-1 text-blue-300">Entregues: {{.TotalDelivered}}</span>
+          <span class="rounded-full bg-red-500/10 px-2.5 py-1 text-red-300">Falhas: {{.TotalFailed}}</span>
+          <span class="rounded-full bg-slate-800 px-2.5 py-1 text-slate-400">Custo Meta est. ~${{.EstimatedMetaCost}}</span>
+          {{if .WithinMonthlyLimit}}
+          <span class="rounded-full bg-emerald-500/10 px-2.5 py-1 font-medium text-emerald-400 ring-1 ring-emerald-500/20">Dentro do Limite</span>
+          {{else}}
+          <span class="rounded-full bg-red-500/10 px-2.5 py-1 font-medium text-red-400 ring-1 ring-red-500/20">Limite Excedido</span>
+          {{end}}
+        </div>
+      </div>
+      <div class="h-3 w-full overflow-hidden rounded-full bg-slate-950">
+        <div
+          class="{{if .WithinMonthlyLimit}}bg-emerald-500{{else}}bg-red-500{{end}} h-3 rounded-full transition-all"
+          style="width: {{if gt .BarWidthPercent 0}}{{.BarWidthPercent}}{{else}}2{{end}}%;"
+        ></div>
+      </div>
+      <p class="mt-1 text-right text-xs text-slate-500">{{.TotalMessagesSent}} / {{.MonthlyLimit}} mensagens no mês</p>
+    </div>
+    {{end}}
+  </div>
+  {{else}}
+  <p class="rounded-xl border border-dashed border-slate-700 px-4 py-8 text-center text-sm text-slate-500">
+    Nenhum disparo registrado neste período.
+  </p>
+  {{end}}
+</div>
+{{end}}

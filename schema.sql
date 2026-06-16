@@ -1,0 +1,4 @@
+-- DEPRECATED: use migrations/ + golang-migrate (automático no startup do cmd/api).
+-- Para rollback manual: migrate CLI ou 000001_create_initial_tables.down.sql
+--
+-- Ver: migrations/000001_create_initial_tables.up.sql

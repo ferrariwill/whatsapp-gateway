@@ -1,0 +1,33 @@
+{{define "channel_row.html"}}
+<tr id="channel-row-{{.ChannelID}}" class="{{if .IsSuspendedSpam}}bg-red-950/20{{end}}">
+  <td class="px-4 py-3 text-slate-300">{{.SystemName}}</td>
+  <td class="px-4 py-3 font-medium text-white">{{.ChannelLabel}}</td>
+  <td class="px-4 py-3 font-mono text-slate-300">{{.ExternalClientID}}</td>
+  <td class="px-4 py-3 font-mono text-slate-200">{{.WhatsAppPhoneNumber}}</td>
+  <td class="px-4 py-3 font-mono text-xs text-emerald-300">{{.PhoneNumberID}}</td>
+  <td class="px-4 py-3">
+    {{if .IsSuspendedSpam}}
+    <span class="inline-flex items-center rounded-full bg-red-500/15 px-2.5 py-1 text-xs font-semibold text-red-300 ring-1 ring-red-500/30">SUSPENDED_SPAM</span>
+    {{else}}
+    <span class="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300 ring-1 ring-emerald-500/20">{{.Status}}</span>
+    {{end}}
+  </td>
+  <td class="px-4 py-3 text-slate-400">{{.CreatedAt}}</td>
+  <td class="px-4 py-3">
+    {{if .IsSuspendedSpam}}
+    <button
+      type="button"
+      class="inline-flex items-center rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20"
+      hx-post="/admin/clients/{{.ChannelID}}/unblock"
+      hx-target="closest tr"
+      hx-swap="outerHTML"
+      hx-confirm="Desbloquear este cliente e limpar a proteção anti-spam em memória?"
+    >
+      🔓 Desbloquear Cliente
+    </button>
+    {{else}}
+    <span class="text-xs text-slate-600">—</span>
+    {{end}}
+  </td>
+</tr>
+{{end}}

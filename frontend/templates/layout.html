@@ -1,0 +1,38 @@
+{{define "layout.html"}}
+<!DOCTYPE html>
+<html lang="pt-BR" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{if .Title}}{{.Title}}{{else}}WhatsApp Gateway{{end}}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script>
+    function copyToClipboard(button) {
+      const value = button.getAttribute('data-copy');
+      if (!value) return;
+      navigator.clipboard.writeText(value).then(function () {
+        const original = button.textContent;
+        button.textContent = 'Copiado!';
+        button.classList.add('bg-emerald-600');
+        setTimeout(function () {
+          button.textContent = original;
+          button.classList.remove('bg-emerald-600');
+        }, 1500);
+      });
+    }
+
+    function openModal(id) {
+      document.getElementById(id).classList.remove('hidden');
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.add('hidden');
+    }
+  </script>
+</head>
+<body class="h-full bg-slate-950 text-slate-100 antialiased">
+  {{block "content" .}}{{end}}
+</body>
+</html>
+{{end}}

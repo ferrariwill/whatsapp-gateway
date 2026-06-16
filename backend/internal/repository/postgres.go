@@ -1,0 +1,559 @@
+package repository
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/whatsappgetway/gateway/internal/model"
+)
+
+var (
+	ErrSystemNotFound        = errors.New("system not found")
+	ErrUserNotFound          = errors.New("user not found")
+	ErrClientChannelNotFound = errors.New("client channel not found")
+	ErrMessageLogNotFound    = errors.New("message log not found")
+)
+
+type PostgresRepository struct {
+	db *sql.DB
+}
+
+func NewPostgresRepository(db *sql.DB) *PostgresRepository {
+	return &PostgresRepository{db: db}
+}
+
+func (r *PostgresRepository) FindSystemByAPIKeyHash(ctx context.Context, apiKeyHash string) (*model.System, error) {
+	const query = `
+		SELECT id, name, api_key_hash, webhook_url, created_at
+		FROM systems WHERE api_key_hash = $1
+	`
+	var system model.System
+	var webhookURL sql.NullString
+	err := r.db.QueryRowContext(ctx, query, apiKeyHash).Scan(
+		&system.ID, &system.Name, &system.APIKeyHash, &webhookURL, &system.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrSystemNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query system by api key hash: %w", err)
+	}
+	if webhookURL.Valid {
+		system.WebhookURL = webhookURL.String
+	}
+	return &system, nil
+}
+
+func (r *PostgresRepository) GetDefaultSystem(ctx context.Context) (*model.System, error) {
+	const query = `
+		SELECT id, name, api_key_hash, webhook_url, created_at
+		FROM systems ORDER BY created_at ASC LIMIT 1
+	`
+	var system model.System
+	var webhookURL sql.NullString
+	err := r.db.QueryRowContext(ctx, query).Scan(
+		&system.ID, &system.Name, &system.APIKeyHash, &webhookURL, &system.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrSystemNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query default system: %w", err)
+	}
+	if webhookURL.Valid {
+		system.WebhookURL = webhookURL.String
+	}
+	return &system, nil
+}
+
+func (r *PostgresRepository) FindUserByEmail(ctx context.Context, email string) (*model.User, error) {
+	const query = `SELECT id, email, password_hash, created_at FROM users WHERE LOWER(email) = LOWER($1)`
+	var user model.User
+	err := r.db.QueryRowContext(ctx, query, email).Scan(&user.ID, &user.Email, &user.PasswordHash, &user.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query user by email: %w", err)
+	}
+	return &user, nil
+}
+
+func (r *PostgresRepository) CreateSystem(ctx context.Context, system *model.System) error {
+	const query = `
+		INSERT INTO systems (name, api_key_hash, webhook_url)
+		VALUES ($1, $2, $3) RETURNING id, created_at
+	`
+	var webhookURL any
+	if system.WebhookURL != "" {
+		webhookURL = system.WebhookURL
+	}
+	err := r.db.QueryRowContext(ctx, query, system.Name, system.APIKeyHash, webhookURL).Scan(&system.ID, &system.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("insert system: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) CreateClientChannel(ctx context.Context, channel *model.ClientChannel) error {
+	const query = `
+		INSERT INTO client_channels (system_id, salon_name, external_client_id, phone_number_id, whatsapp_phone_number)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id, status, created_at
+	`
+	err := r.db.QueryRowContext(ctx, query,
+		channel.SystemID, channel.SalonName, channel.ExternalClientID,
+		channel.PhoneNumberID, channel.WhatsAppPhoneNumber,
+	).Scan(&channel.ID, &channel.Status, &channel.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("insert client channel: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) FindClientChannelByPhoneNumberID(ctx context.Context, phoneNumberID string) (*model.ClientChannelWithSystem, error) {
+	const query = `
+		SELECT cc.id, cc.system_id, cc.salon_name, cc.external_client_id, cc.phone_number_id,
+		       cc.whatsapp_phone_number, cc.status, cc.created_at, s.name, s.webhook_url
+		FROM client_channels cc
+		INNER JOIN systems s ON s.id = cc.system_id
+		WHERE cc.phone_number_id = $1
+	`
+	return r.scanClientChannelWithSystem(ctx, query, phoneNumberID)
+}
+
+func (r *PostgresRepository) FindClientChannelBySystemAndExternalClientID(
+	ctx context.Context, systemID, externalClientID string,
+) (*model.ClientChannel, error) {
+	const query = `
+		SELECT id, system_id, salon_name, external_client_id, phone_number_id, whatsapp_phone_number, status, created_at
+		FROM client_channels WHERE system_id = $1 AND external_client_id = $2
+	`
+	var ch model.ClientChannel
+	err := r.db.QueryRowContext(ctx, query, systemID, externalClientID).Scan(
+		&ch.ID, &ch.SystemID, &ch.SalonName, &ch.ExternalClientID,
+		&ch.PhoneNumberID, &ch.WhatsAppPhoneNumber, &ch.Status, &ch.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrClientChannelNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query client channel: %w", err)
+	}
+	return &ch, nil
+}
+
+func (r *PostgresRepository) ListClientChannels(ctx context.Context) ([]model.ClientChannelWithSystem, error) {
+	const query = `
+		SELECT cc.id, cc.system_id, cc.salon_name, cc.external_client_id, cc.phone_number_id,
+		       cc.whatsapp_phone_number, cc.status, cc.created_at, s.name, s.webhook_url
+		FROM client_channels cc
+		INNER JOIN systems s ON s.id = cc.system_id
+		ORDER BY cc.created_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query client channels: %w", err)
+	}
+	defer rows.Close()
+
+	channels := make([]model.ClientChannelWithSystem, 0)
+	for rows.Next() {
+		ch, err := r.scanClientChannelRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		channels = append(channels, ch)
+	}
+	return channels, rows.Err()
+}
+
+func (r *PostgresRepository) scanClientChannelWithSystem(ctx context.Context, query string, arg any) (*model.ClientChannelWithSystem, error) {
+	var ch model.ClientChannelWithSystem
+	var webhookURL sql.NullString
+	err := r.db.QueryRowContext(ctx, query, arg).Scan(
+		&ch.ID, &ch.SystemID, &ch.SalonName, &ch.ExternalClientID, &ch.PhoneNumberID,
+		&ch.WhatsAppPhoneNumber, &ch.Status, &ch.CreatedAt, &ch.SystemName, &webhookURL,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrClientChannelNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan client channel: %w", err)
+	}
+	if webhookURL.Valid {
+		ch.WebhookURL = webhookURL.String
+	}
+	return &ch, nil
+}
+
+func (r *PostgresRepository) scanClientChannelRow(rows *sql.Rows) (model.ClientChannelWithSystem, error) {
+	var ch model.ClientChannelWithSystem
+	var webhookURL sql.NullString
+	err := rows.Scan(
+		&ch.ID, &ch.SystemID, &ch.SalonName, &ch.ExternalClientID, &ch.PhoneNumberID,
+		&ch.WhatsAppPhoneNumber, &ch.Status, &ch.CreatedAt, &ch.SystemName, &webhookURL,
+	)
+	if err != nil {
+		return ch, fmt.Errorf("scan client channel row: %w", err)
+	}
+	if webhookURL.Valid {
+		ch.WebhookURL = webhookURL.String
+	}
+	return ch, nil
+}
+
+func (r *PostgresRepository) FindClientChannelByID(ctx context.Context, channelID string) (*model.ClientChannelWithSystem, error) {
+	const query = `
+		SELECT cc.id, cc.system_id, cc.salon_name, cc.external_client_id, cc.phone_number_id,
+		       cc.whatsapp_phone_number, cc.status, cc.created_at, s.name, s.webhook_url
+		FROM client_channels cc
+		INNER JOIN systems s ON s.id = cc.system_id
+		WHERE cc.id = $1
+	`
+	return r.scanClientChannelWithSystem(ctx, query, channelID)
+}
+
+func (r *PostgresRepository) SuspendClientChannelForSpam(ctx context.Context, channelID string) error {
+	const query = `
+		UPDATE client_channels
+		SET status = 'SUSPENDED_SPAM'
+		WHERE id = $1
+	`
+	result, err := r.db.ExecContext(ctx, query, channelID)
+	if err != nil {
+		return fmt.Errorf("suspend client channel: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("suspend client channel rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrClientChannelNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) ActivateClientChannel(ctx context.Context, channelID string) error {
+	const query = `
+		UPDATE client_channels
+		SET status = 'ACTIVE'
+		WHERE id = $1
+	`
+	result, err := r.db.ExecContext(ctx, query, channelID)
+	if err != nil {
+		return fmt.Errorf("activate client channel: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("activate client channel rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrClientChannelNotFound
+	}
+	return nil
+}
+
+type MessageLogWithSystem struct {
+	model.MessageLog
+	SystemName string
+}
+
+func (r *PostgresRepository) ListRecentMessageLogs(ctx context.Context, limit int) ([]MessageLogWithSystem, error) {
+	const query = `
+		SELECT ml.id, ml.system_id, ml.external_client_id, ml.meta_message_id, ml.appointment_id,
+		       ml.phone_number, ml.template_name, ml.sent_content, ml.received_content, ml.direction,
+		       ml.message_category, ml.status, ml.meta_cost, ml.delivered_at, ml.created_at, s.name
+		FROM message_logs ml INNER JOIN systems s ON s.id = ml.system_id
+		ORDER BY ml.created_at DESC LIMIT $1
+	`
+	rows, err := r.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query message logs: %w", err)
+	}
+	defer rows.Close()
+
+	logs := make([]MessageLogWithSystem, 0)
+	for rows.Next() {
+		entry, err := scanMessageLogWithSystem(rows)
+		if err != nil {
+			return nil, err
+		}
+		logs = append(logs, entry)
+	}
+	return logs, rows.Err()
+}
+
+func scanMessageLogWithSystem(scanner interface {
+	Scan(dest ...any) error
+}) (MessageLogWithSystem, error) {
+	var entry MessageLogWithSystem
+	var externalClientID, metaMessageID, messageCategory sql.NullString
+	var templateName, sentContent, receivedContent, direction sql.NullString
+	var deliveredAt sql.NullTime
+	err := scanner.Scan(
+		&entry.ID, &entry.SystemID, &externalClientID, &metaMessageID, &entry.AppointmentID,
+		&entry.PhoneNumber, &templateName, &sentContent, &receivedContent, &direction,
+		&messageCategory, &entry.Status, &entry.MetaCost, &deliveredAt, &entry.CreatedAt, &entry.SystemName,
+	)
+	if err != nil {
+		return entry, fmt.Errorf("scan message log: %w", err)
+	}
+	if externalClientID.Valid {
+		entry.ExternalClientID = externalClientID.String
+	}
+	if metaMessageID.Valid {
+		entry.MetaMessageID = metaMessageID.String
+	}
+	if templateName.Valid {
+		entry.TemplateName = templateName.String
+	}
+	if sentContent.Valid {
+		entry.SentContent = sentContent.String
+	}
+	if receivedContent.Valid {
+		entry.ReceivedContent = receivedContent.String
+	}
+	if direction.Valid {
+		entry.Direction = model.MessageDirection(direction.String)
+	} else {
+		entry.Direction = model.MessageDirectionOutbound
+	}
+	if messageCategory.Valid {
+		entry.MessageCategory = model.MessageCategory(messageCategory.String)
+	}
+	if deliveredAt.Valid {
+		entry.DeliveredAt = &deliveredAt.Time
+	}
+	return entry, nil
+}
+
+func (r *PostgresRepository) FindHighVolumeClientKeys(
+	ctx context.Context,
+	windowMinutes int,
+	threshold int64,
+) (map[string]struct{}, error) {
+	const query = `
+		SELECT system_id, external_client_id
+		FROM message_logs
+		WHERE direction = 'OUTBOUND'
+		  AND external_client_id IS NOT NULL
+		  AND external_client_id <> ''
+		  AND created_at >= NOW() AT TIME ZONE 'UTC' - ($1 * INTERVAL '1 minute')
+		GROUP BY system_id, external_client_id
+		HAVING COUNT(*) > $2
+	`
+	rows, err := r.db.QueryContext(ctx, query, windowMinutes, threshold)
+	if err != nil {
+		return nil, fmt.Errorf("find high volume clients: %w", err)
+	}
+	defer rows.Close()
+
+	keys := make(map[string]struct{})
+	for rows.Next() {
+		var systemID, externalClientID string
+		if err := rows.Scan(&systemID, &externalClientID); err != nil {
+			return nil, fmt.Errorf("scan high volume client: %w", err)
+		}
+		keys[systemID+"|"+externalClientID] = struct{}{}
+	}
+	return keys, rows.Err()
+}
+
+func (r *PostgresRepository) CreateMessageLog(ctx context.Context, log *model.MessageLog) error {
+	if log.Direction == "" {
+		log.Direction = model.MessageDirectionOutbound
+	}
+	const query = `
+		INSERT INTO message_logs (
+			system_id, external_client_id, meta_message_id, appointment_id, phone_number,
+			template_name, sent_content, received_content, direction,
+			message_category, status, meta_cost
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id, created_at
+	`
+	var externalClientID, metaMessageID, messageCategory, templateName, sentContent, receivedContent any
+	if log.ExternalClientID != "" {
+		externalClientID = log.ExternalClientID
+	}
+	if log.MetaMessageID != "" {
+		metaMessageID = log.MetaMessageID
+	}
+	if log.TemplateName != "" {
+		templateName = log.TemplateName
+	}
+	if log.SentContent != "" {
+		sentContent = log.SentContent
+	}
+	if log.ReceivedContent != "" {
+		receivedContent = log.ReceivedContent
+	}
+	if log.MessageCategory != "" {
+		messageCategory = string(log.MessageCategory)
+	}
+
+	err := r.db.QueryRowContext(ctx, query,
+		log.SystemID, externalClientID, metaMessageID, log.AppointmentID, log.PhoneNumber,
+		templateName, sentContent, receivedContent, string(log.Direction),
+		messageCategory, log.Status, log.MetaCost,
+	).Scan(&log.ID, &log.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("insert message log: %w", err)
+	}
+	return nil
+}
+
+type ClientUsageStats struct {
+	TotalSent          int64
+	TotalDelivered     int64
+	TotalFailed        int64
+	UtilityDelivered   int64
+}
+
+type ApplicationClientUsageRow struct {
+	SystemID         string
+	SystemName       string
+	ExternalClientID string
+	Stats            ClientUsageStats
+}
+
+func (r *PostgresRepository) AggregateUsageVolumeByApplicationAndClient(
+	ctx context.Context,
+	month, year int,
+) ([]ApplicationClientUsageRow, error) {
+	const query = `
+		SELECT
+			s.id AS system_id,
+			s.name AS system_name,
+			ml.external_client_id,
+			COUNT(*) FILTER (WHERE ml.status IN ('sent', 'delivered', 'failed') AND ml.direction = 'OUTBOUND')::bigint,
+			COUNT(*) FILTER (WHERE ml.status = 'delivered')::bigint,
+			COUNT(*) FILTER (WHERE ml.status = 'failed')::bigint,
+			COUNT(*) FILTER (
+				WHERE ml.status = 'delivered'
+				  AND UPPER(COALESCE(ml.message_category, 'UTILITY')) = 'UTILITY'
+			)::bigint
+		FROM message_logs ml
+		INNER JOIN systems s ON s.id = ml.system_id
+		WHERE ml.external_client_id IS NOT NULL
+		  AND ml.external_client_id <> ''
+		  AND EXTRACT(MONTH FROM ml.created_at AT TIME ZONE 'UTC') = $1
+		  AND EXTRACT(YEAR FROM ml.created_at AT TIME ZONE 'UTC') = $2
+		GROUP BY s.id, s.name, ml.external_client_id
+		ORDER BY s.name ASC, ml.external_client_id ASC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, month, year)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate usage by application and client: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]ApplicationClientUsageRow, 0)
+	for rows.Next() {
+		var row ApplicationClientUsageRow
+		if err := rows.Scan(
+			&row.SystemID, &row.SystemName, &row.ExternalClientID,
+			&row.Stats.TotalSent, &row.Stats.TotalDelivered, &row.Stats.TotalFailed, &row.Stats.UtilityDelivered,
+		); err != nil {
+			return nil, fmt.Errorf("scan application client usage row: %w", err)
+		}
+		results = append(results, row)
+	}
+	return results, rows.Err()
+}
+
+func (r *PostgresRepository) AggregateClientUsageStats(
+	ctx context.Context,
+	systemID, externalClientID string,
+	month, year int,
+) (ClientUsageStats, error) {
+	const query = `
+		SELECT
+			COUNT(*) FILTER (WHERE status IN ('sent', 'delivered', 'failed') AND direction = 'OUTBOUND')::bigint,
+			COUNT(*) FILTER (WHERE status = 'delivered')::bigint,
+			COUNT(*) FILTER (WHERE status = 'failed')::bigint,
+			COUNT(*) FILTER (
+				WHERE status = 'delivered'
+				  AND UPPER(COALESCE(message_category, 'UTILITY')) = 'UTILITY'
+			)::bigint
+		FROM message_logs
+		WHERE system_id = $1
+		  AND external_client_id = $2
+		  AND EXTRACT(MONTH FROM created_at AT TIME ZONE 'UTC') = $3
+		  AND EXTRACT(YEAR FROM created_at AT TIME ZONE 'UTC') = $4
+	`
+
+	var stats ClientUsageStats
+	err := r.db.QueryRowContext(ctx, query, systemID, externalClientID, month, year).Scan(
+		&stats.TotalSent, &stats.TotalDelivered, &stats.TotalFailed, &stats.UtilityDelivered,
+	)
+	if err != nil {
+		return ClientUsageStats{}, fmt.Errorf("aggregate client usage stats: %w", err)
+	}
+	return stats, nil
+}
+
+func (r *PostgresRepository) CountMonthlyMessagesForClient(
+	ctx context.Context,
+	systemID, externalClientID string,
+	month, year int,
+) (int64, error) {
+	const query = `
+		SELECT COUNT(*)::bigint
+		FROM message_logs
+		WHERE system_id = $1
+		  AND external_client_id = $2
+		  AND direction = 'OUTBOUND'
+		  AND status IN ('sent', 'delivered', 'failed')
+		  AND EXTRACT(MONTH FROM created_at AT TIME ZONE 'UTC') = $3
+		  AND EXTRACT(YEAR FROM created_at AT TIME ZONE 'UTC') = $4
+	`
+
+	var count int64
+	err := r.db.QueryRowContext(ctx, query, systemID, externalClientID, month, year).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count monthly messages: %w", err)
+	}
+	return count, nil
+}
+
+func (r *PostgresRepository) MarkMessageLogDelivered(
+	ctx context.Context,
+	metaMessageID string,
+	messageCategory model.MessageCategory,
+	metaCost float64,
+	deliveredAt time.Time,
+) error {
+	const query = `
+		UPDATE message_logs
+		SET status = $2,
+		    message_category = $3,
+		    meta_cost = $4,
+		    delivered_at = $5
+		WHERE meta_message_id = $1
+		  AND status <> 'delivered'
+	`
+	result, err := r.db.ExecContext(ctx, query,
+		metaMessageID,
+		model.MessageStatusDelivered,
+		string(messageCategory),
+		metaCost,
+		deliveredAt,
+	)
+	if err != nil {
+		return fmt.Errorf("update message log delivered: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrMessageLogNotFound
+	}
+	return nil
+}
