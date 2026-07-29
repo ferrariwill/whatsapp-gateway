@@ -54,6 +54,7 @@ type metaMessageStatus struct {
 }
 
 type metaInboundMessage struct {
+	ID   string `json:"id"`
 	From string `json:"from"`
 	Type string `json:"type"`
 	Text *struct {
@@ -133,7 +134,7 @@ func (s *server) handleMetaWebhookEvent(w http.ResponseWriter, r *http.Request) 
 		targetURL = strings.TrimSpace(os.Getenv("MOTHER_SYSTEM_WEBHOOK_URL"))
 	}
 
-	s.processDeliveryStatuses(r.Context(), payload)
+	s.processDeliveryStatuses(r.Context(), phoneNumberID, payload)
 
 	events := extractInboundEvents(payload)
 	for _, event := range events {
@@ -188,7 +189,15 @@ func (s *server) handleMetaWebhookEvent(w http.ResponseWriter, r *http.Request) 
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-func (s *server) processDeliveryStatuses(ctx context.Context, payload metaWebhookPayload) {
+func (s *server) processDeliveryStatuses(ctx context.Context, phoneNumberID string, payload metaWebhookPayload) {
+	conn, err := s.repo.FindConnectionByPhoneNumberID(ctx, phoneNumberID)
+	if err != nil {
+		if !errors.Is(err, repository.ErrConnectionNotFound) {
+			log.Printf("lookup connection for delivery status phone_number_id %s: %v", phoneNumberID, err)
+		}
+		return
+	}
+
 	for _, entry := range payload.Entry {
 		for _, change := range entry.Changes {
 			if change.Field != "messages" {
@@ -212,9 +221,11 @@ func (s *server) processDeliveryStatuses(ctx context.Context, payload metaWebhoo
 				metaCost := service.MetaCostForCategory(category)
 				deliveredAt := parseMetaWebhookTimestamp(statusUpdate.Timestamp)
 
-				if err := s.repo.MarkMessageLogDelivered(ctx, metaMessageID, model.MessageCategory(category), metaCost, deliveredAt); err != nil {
+				if err := s.repo.MarkMessageLogDelivered(
+					ctx, metaMessageID, conn.ID, model.MessageCategory(category), metaCost, deliveredAt,
+				); err != nil {
 					if errors.Is(err, repository.ErrMessageLogNotFound) {
-						log.Printf("delivery webhook for unknown meta_message_id %s", metaMessageID)
+						log.Printf("delivery webhook for unknown/unscoped meta_message_id %s", metaMessageID)
 						continue
 					}
 					log.Printf("mark message %s delivered: %v", metaMessageID, err)
@@ -237,6 +248,7 @@ func parseMetaWebhookTimestamp(raw string) time.Time {
 }
 
 type inboundEvent struct {
+	id        string
 	from      string
 	text      string
 	eventType string
@@ -269,6 +281,7 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 	if from == "" {
 		return inboundEvent{}, false
 	}
+	messageID := strings.TrimSpace(message.ID)
 
 	switch message.Type {
 	case "text":
@@ -276,6 +289,7 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			return inboundEvent{}, false
 		}
 		return inboundEvent{
+			id:        messageID,
 			from:      from,
 			text:      strings.TrimSpace(message.Text.Body),
 			eventType: "text_message",
@@ -290,6 +304,7 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			payload = strings.TrimSpace(message.Button.Text)
 		}
 		return inboundEvent{
+			id:        messageID,
 			from:      from,
 			text:      payload,
 			eventType: "button_reply",
@@ -305,6 +320,7 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			payload = strings.TrimSpace(message.Interactive.ButtonReply.Title)
 		}
 		return inboundEvent{
+			id:        messageID,
 			from:      from,
 			text:      payload,
 			eventType: "button_reply",

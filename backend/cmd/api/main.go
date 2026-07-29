@@ -32,6 +32,8 @@ import (
 
 
 
+	"github.com/whatsappgetway/gateway/internal/envutil"
+
 	"github.com/whatsappgetway/gateway/internal/model"
 
 	"github.com/whatsappgetway/gateway/internal/provider"
@@ -120,6 +122,10 @@ type createTemplateRequest struct {
 
 	Buttons  []string `json:"buttons"`
 
+	SistemaOrigem string `json:"sistema_origem"`
+
+	TenantID string `json:"tenant_id"`
+
 }
 
 
@@ -152,11 +158,11 @@ type errorResponse struct {
 
 func main() {
 
-	databaseURL := os.Getenv("DATABASE_URL")
+	databaseURL, err := envutil.ResolveDatabaseURL()
 
-	if databaseURL == "" {
+	if err != nil {
 
-		log.Fatal("DATABASE_URL is required")
+		log.Fatal(err)
 
 	}
 
@@ -254,17 +260,36 @@ func main() {
 
 	mux.Handle("GET /dashboard", srv.jwtMiddleware(http.HandlerFunc(srv.handleDashboard)))
 
+	mux.Handle("POST /admin/systems", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminCreateSystem)))
+
+	mux.Handle("POST /admin/systems/{id}", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUpdateSystem)))
+
+	mux.Handle("POST /admin/systems/{id}/delete", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminDeleteSystem)))
+
 	mux.Handle("POST /admin/channels", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminCreateChannel)))
+
+	mux.Handle("POST /admin/channels/{id}", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUpdateChannel)))
+
+	mux.Handle("POST /admin/channels/{id}/delete", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminDeleteChannel)))
 
 	mux.Handle("POST /admin/clients/{id}/unblock", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUnblockClient)))
 
+	mux.Handle("POST /admin/connections", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminCreateConnection)))
+	mux.Handle("POST /admin/connections/{id}", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUpdateConnection)))
+	mux.Handle("POST /admin/connections/{id}/delete", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminDeleteConnection)))
+	mux.Handle("POST /admin/connections/{id}/unblock", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUnblockConnection)))
+
 	mux.Handle("GET /admin/usage/volume", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUsageVolume)))
 
+	mux.HandleFunc("GET /webhook/whatsapp", srv.handleWhatsAppWebhookVerify)
+	mux.HandleFunc("POST /webhook/whatsapp", srv.handleWhatsAppWebhookEvent)
 
+	mux.HandleFunc("GET /meta/embedded-signup/callback", srv.handleEmbeddedSignupCallback)
 
 	mux.HandleFunc("GET /webhooks/meta/{phone_number_id}", srv.handleMetaWebhookVerify)
-
 	mux.HandleFunc("POST /webhooks/meta/{phone_number_id}", srv.handleMetaWebhookEvent)
+
+	mux.Handle("POST /send-notification", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendNotification)))
 
 
 
@@ -442,14 +467,10 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	security.SetAuthCookie(w, token)
 
-
-
 	if isHTMX(r) {
-
-		s.renderDashboard(w, r)
-
+		w.Header().Set("HX-Redirect", "/dashboard")
+		w.WriteHeader(http.StatusOK)
 		return
-
 	}
 
 
@@ -504,6 +525,13 @@ func (s *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 
+	systems, err := s.repo.ListSystems(r.Context())
+	if err != nil {
+		log.Printf("list systems: %v", err)
+		http.Error(w, "failed to load systems", http.StatusInternalServerError)
+		return
+	}
+
 	channels, err := s.repo.ListClientChannels(r.Context())
 
 	if err != nil {
@@ -514,6 +542,13 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 
 		return
 
+	}
+
+	connections, err := s.repo.ListWhatsAppConnections(r.Context())
+	if err != nil {
+		log.Printf("list whatsapp connections: %v", err)
+		http.Error(w, "failed to load connections", http.StatusInternalServerError)
+		return
 	}
 
 
@@ -536,7 +571,7 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		spamKeys = map[string]struct{}{}
 	}
 
-	renderDashboardPage(w, s.templates, buildDashboardData(channels, logs, spamKeys))
+	renderDashboardPage(w, s.templates, buildDashboardData(systems, connections, channels, logs, spamKeys))
 
 }
 
@@ -544,35 +579,19 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleAdminCreateChannel(w http.ResponseWriter, r *http.Request) {
 
-	if _, ok := userIDFromContext(r.Context()); !ok {
-
-		if isHTMX(r) {
-
-			w.Header().Set("HX-Redirect", "/login")
-
-			w.WriteHeader(http.StatusUnauthorized)
-
-			return
-
-		}
-
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-
+	if !s.requireAdminUser(w, r) {
 		return
-
 	}
-
-
 
 	if err := r.ParseForm(); err != nil {
 
-		writeHTML(w, http.StatusBadRequest, channelFormErrorHTML("formulário inválido"))
+		respondChannelFormError(w, r, http.StatusBadRequest, "formulário inválido")
 
 		return
 
 	}
 
-
+	systemID := strings.TrimSpace(r.FormValue("system_id"))
 
 	salonName := strings.TrimSpace(r.FormValue("salon_name"))
 
@@ -582,23 +601,19 @@ func (s *server) handleAdminCreateChannel(w http.ResponseWriter, r *http.Request
 
 	phoneNumberID := strings.TrimSpace(r.FormValue("phone_number_id"))
 
+	if systemID == "" || salonName == "" || externalClientID == "" || whatsappPhoneNumber == "" || phoneNumberID == "" {
 
-
-	if salonName == "" || externalClientID == "" || whatsappPhoneNumber == "" || phoneNumberID == "" {
-
-		writeHTML(w, http.StatusBadRequest, channelFormErrorHTML("preencha todos os campos obrigatórios"))
+		respondChannelFormError(w, r, http.StatusBadRequest, "preencha todos os campos obrigatórios")
 
 		return
 
 	}
 
-
-
-	system, err := s.repo.GetDefaultSystem(r.Context())
+	system, err := s.repo.FindSystemByID(r.Context(), systemID)
 
 	if errors.Is(err, repository.ErrSystemNotFound) {
 
-		writeHTML(w, http.StatusBadRequest, channelFormErrorHTML("nenhum sistema mãe cadastrado — configure o seed ou migration primeiro"))
+		respondChannelFormError(w, r, http.StatusBadRequest, "selecione uma aplicação válida")
 
 		return
 
@@ -606,15 +621,13 @@ func (s *server) handleAdminCreateChannel(w http.ResponseWriter, r *http.Request
 
 	if err != nil {
 
-		log.Printf("get default system: %v", err)
+		log.Printf("find system %s: %v", systemID, err)
 
-		writeHTML(w, http.StatusInternalServerError, channelFormErrorHTML("erro ao carregar sistema mãe"))
+		respondChannelFormError(w, r, http.StatusInternalServerError, "erro ao carregar aplicação")
 
 		return
 
 	}
-
-
 
 	channel := &model.ClientChannel{
 
@@ -630,21 +643,17 @@ func (s *server) handleAdminCreateChannel(w http.ResponseWriter, r *http.Request
 
 	}
 
-
-
 	if err := s.repo.CreateClientChannel(r.Context(), channel); err != nil {
 
 		log.Printf("create client channel: %v", err)
 
-		writeHTML(w, http.StatusInternalServerError, channelFormErrorHTML("erro ao salvar canal WhatsApp"))
+		respondChannelFormError(w, r, http.StatusInternalServerError, "erro ao salvar canal WhatsApp — verifique se o Phone Number ID já não está em uso")
 
 		return
 
 	}
 
-
-
-	row := newChannelRow(system.Name, channel.ID, channel.SalonName, channel.ExternalClientID, channel.WhatsAppPhoneNumber, channel.PhoneNumberID, channel.Status, channel.CreatedAt)
+	row := newChannelRow(system.ID, system.Name, channel.ID, channel.SalonName, channel.ExternalClientID, channel.WhatsAppPhoneNumber, channel.PhoneNumberID, channel.Status, channel.CreatedAt)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
@@ -848,12 +857,21 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
-	if !s.enforceSpamProtection(w, r, system, channel) {
-
+	conn, err := s.resolveConnectionForChannel(r.Context(), system, channel, req.ExternalClientID)
+	if errors.Is(err, repository.ErrConnectionNotFound) {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: "whatsapp connection not configured — cadastre em whatsapp_connections ou use POST /send-notification",
+		})
 		return
+	}
+	if err != nil {
+		log.Printf("resolve connection for system %s client %s: %v", system.ID, req.ExternalClientID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
+		return
+	}
 
+	if !s.enforceConnectionSpamProtection(w, r, conn) {
+		return
 	}
 
 
@@ -876,7 +894,14 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
 	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 
-	metaMessageID, sendErr := metaProvider.SendAppointmentTemplate(r.Context(), channel.PhoneNumberID, req.PhoneNumber, req.TemplateName, req.Variables)
+	metaMessageID, sendErr := metaProvider.SendAppointmentTemplate(
+		r.Context(),
+		conn.AccessToken,
+		conn.PhoneNumberID,
+		req.PhoneNumber,
+		req.TemplateName,
+		req.Variables,
+	)
 
 
 
@@ -895,6 +920,10 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 	messageLog := &model.MessageLog{
 
 		SystemID:         system.ID,
+
+		ConnectionID:     conn.ID,
+
+		SistemaOrigem:    conn.SistemaOrigem,
 
 		ExternalClientID: req.ExternalClientID,
 
@@ -984,6 +1013,10 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 
 	req.TextBody = strings.TrimSpace(req.TextBody)
 
+	req.SistemaOrigem = strings.TrimSpace(strings.ToLower(req.SistemaOrigem))
+
+	req.TenantID = strings.TrimSpace(req.TenantID)
+
 
 
 	if req.Name == "" || req.TextBody == "" {
@@ -994,11 +1027,46 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	if req.TenantID == "" {
+
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "tenant_id is required"})
+
+		return
+
+	}
+
+	if req.SistemaOrigem != "" && req.SistemaOrigem != system.Slug {
+
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "sistema_origem does not match authenticated system"})
+
+		return
+
+	}
+
+	conn, err := s.repo.FindConnectionBySystemAndTenant(r.Context(), system.ID, req.TenantID)
+	if errors.Is(err, repository.ErrConnectionNotFound) {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "whatsapp connection not found"})
+		return
+	}
+	if err != nil {
+		log.Printf("lookup connection %s/%s: %v", system.Slug, req.TenantID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
+		return
+	}
+
 
 
 	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 
-	templateID, err := metaProvider.CreateTemplate(r.Context(), req.Name, req.Category, req.TextBody, req.Buttons)
+	templateID, err := metaProvider.CreateTemplate(
+		r.Context(),
+		conn.AccessToken,
+		conn.WabaID,
+		req.Name,
+		req.Category,
+		req.TextBody,
+		req.Buttons,
+	)
 
 	if err != nil {
 
@@ -1036,15 +1104,38 @@ func (s *server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	_ = system
+
+	tenantID := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
+
+	if tenantID == "" {
+
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "tenant_id query param is required"})
+
+		return
+
+	}
+
+	conn, err := s.repo.FindConnectionBySystemAndTenant(r.Context(), system.ID, tenantID)
+	if errors.Is(err, repository.ErrConnectionNotFound) {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "whatsapp connection not found"})
+		return
+	}
+	if err != nil {
+		log.Printf("lookup connection %s/%s: %v", system.Slug, tenantID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
+		return
+	}
+
 
 
 	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 
-	templates, err := metaProvider.GetTemplatesStatus(r.Context())
+	templates, err := metaProvider.GetTemplatesStatus(r.Context(), conn.AccessToken, conn.WabaID)
 
 	if err != nil {
 
-		log.Printf("list templates for system %s: %v", system.ID, err)
+		log.Printf("list templates for %s/%s: %v", system.Slug, tenantID, err)
 
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: err.Error()})
 

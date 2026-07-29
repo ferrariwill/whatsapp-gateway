@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -11,6 +12,56 @@ import (
 	"github.com/whatsappgetway/gateway/internal/repository"
 	"github.com/whatsappgetway/gateway/internal/security"
 )
+
+func (s *server) resolveConnectionForChannel(
+	ctx context.Context,
+	system model.System,
+	channel *model.ClientChannel,
+	externalClientID string,
+) (*model.WhatsAppConnection, error) {
+	conn, err := s.repo.FindConnectionByPhoneNumberID(ctx, channel.PhoneNumberID)
+	if err == nil {
+		return conn, nil
+	}
+	if !errors.Is(err, repository.ErrConnectionNotFound) {
+		return nil, err
+	}
+	return s.repo.FindConnectionBySystemAndTenant(ctx, system.ID, externalClientID)
+}
+
+func (s *server) enforceConnectionSpamProtection(
+	w http.ResponseWriter,
+	r *http.Request,
+	conn *model.WhatsAppConnection,
+) bool {
+	if conn.Status == model.ConnectionStatusSuspendedSpam ||
+		s.rateLimiter.IsBlacklisted(conn.SystemID, conn.TenantID) {
+		writeJSON(w, http.StatusTooManyRequests, errorResponse{
+			Error: "tenant temporarily blocked due to spam protection",
+		})
+		return false
+	}
+
+	result := s.rateLimiter.RecordAttempt(conn.SystemID, conn.TenantID)
+	if result.Allowed {
+		return true
+	}
+
+	if result.TriggerAlert {
+		if err := s.repo.SuspendConnectionForSpam(r.Context(), conn.ID); err != nil {
+			log.Printf("suspend connection %s for spam: %v", conn.ID, err)
+		} else {
+			conn.Status = model.ConnectionStatusSuspendedSpam
+		}
+		metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
+		go s.notifySpamForConnection(conn, result.Count, metaProvider)
+	}
+
+	writeJSON(w, http.StatusTooManyRequests, errorResponse{
+		Error: security.FormatRateLimitError(result.Count, s.rateLimiter.MaxPerMinute()),
+	})
+	return false
+}
 
 func (s *server) handleAdminUnblockClient(w http.ResponseWriter, r *http.Request) {
 	if _, ok := userIDFromContext(r.Context()); !ok {
@@ -96,6 +147,7 @@ func (s *server) enforceSpamProtection(
 
 func channelRowFromModel(channel model.ClientChannelWithSystem) channelRowData {
 	return newChannelRow(
+		channel.SystemID,
 		channel.SystemName,
 		channel.ID,
 		channel.SalonName,

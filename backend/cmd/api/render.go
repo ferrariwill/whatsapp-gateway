@@ -54,6 +54,13 @@ type dashboardPageData struct {
 
 	pageData
 
+	Systems        []systemRowData
+	SystemOptions  []systemOptionData
+
+	HasSystems  bool
+
+	Connections []connectionRowData
+
 	Channels    []channelRowData
 
 	AuditLogs   []auditLogRowData
@@ -64,9 +71,41 @@ type dashboardPageData struct {
 
 }
 
+type systemRowData struct {
+	ID         string
+	Name       string
+	Slug       string
+	WebhookURL string
+	APIKeyHint string
+	CreatedAt  string
+}
 
+type systemOptionData struct {
+	ID   string
+	Name string
+	Slug string
+}
+
+type connectionRowData struct {
+	ConnectionID        string
+	SystemID            string
+	SystemName          string
+	SystemSlug          string
+	SistemaOrigem       string
+	TenantID            string
+	WabaID              string
+	PhoneNumberID       string
+	AccessTokenHint     string
+	WebhookURL          string
+	WhatsAppPhoneNumber string
+	Status              string
+	IsSuspendedSpam     bool
+	CreatedAt           string
+}
 
 type channelRowData struct {
+
+	SystemID            string
 
 	SystemName          string
 
@@ -154,11 +193,13 @@ func resolveTemplatesDir() string {
 
 	candidates := []string{
 
+		filepath.Join("..", "..", "frontend", "templates"),
+
 		filepath.Join("..", "frontend", "templates"),
 
-		"templates",
-
 		filepath.Join("frontend", "templates"),
+
+		"templates",
 
 	}
 
@@ -176,13 +217,15 @@ func resolveTemplatesDir() string {
 
 
 
-	return filepath.Join("..", "frontend", "templates")
+	return filepath.Join("..", "..", "frontend", "templates")
 
 }
 
 
 
 func buildDashboardData(
+	systems []model.System,
+	connections []model.WhatsAppConnection,
 	channels []model.ClientChannelWithSystem,
 	logs []repository.MessageLogWithSystem,
 	spamKeys map[string]struct{},
@@ -190,11 +233,35 @@ func buildDashboardData(
 
 	now := time.Now()
 
+	systemRows := make([]systemRowData, 0, len(systems))
+	systemOptions := make([]systemOptionData, 0, len(systems))
+	systemNames := make(map[string]string, len(systems))
+	for _, sys := range systems {
+		systemRows = append(systemRows, newSystemRow(sys))
+		systemOptions = append(systemOptions, systemOptionData{
+			ID:   sys.ID,
+			Name: sys.Name,
+			Slug: sys.Slug,
+		})
+		systemNames[sys.ID] = sys.Name
+	}
+
+	connectionRows := make([]connectionRowData, 0, len(connections))
+	for _, conn := range connections {
+		systemName := systemNames[conn.SystemID]
+		if systemName == "" {
+			systemName = conn.SistemaOrigem
+		}
+		connectionRows = append(connectionRows, newConnectionRow(conn, systemName))
+	}
+
 	channelRows := make([]channelRowData, 0, len(channels))
 
 	for _, ch := range channels {
 
 		channelRows = append(channelRows, channelRowData{
+
+			SystemID:            ch.SystemID,
 
 			SystemName:          ch.SystemName,
 
@@ -238,29 +305,119 @@ func buildDashboardData(
 	}
 
 	return dashboardPageData{
-
 		pageData: pageData{Title: "Dashboard — Volume de Disparos por Aplicação e Clientes"},
-
-		Channels: channelRows,
-
-		AuditLogs: auditRows,
-
-		UsageMonth: int(now.Month()),
-
-		UsageYear:  now.Year(),
-
+		Systems:       systemRows,
+		SystemOptions: systemOptions,
+		HasSystems:    len(systemRows) > 0,
+		Connections:  connectionRows,
+		Channels:     channelRows,
+		AuditLogs:    auditRows,
+		UsageMonth:   int(now.Month()),
+		UsageYear:    now.Year(),
 	}
-
 }
 
 
 
-func newChannelRow(systemName, channelID, channelLabel, externalClientID, whatsappPhoneNumber, phoneNumberID, status string, createdAt time.Time) channelRowData {
+func newSystemRow(system model.System) systemRowData {
+	hint := system.APIKeyHash
+	if len(hint) > 8 {
+		hint = "…" + hint[len(hint)-8:]
+	}
+	return systemRowData{
+		ID:         system.ID,
+		Name:       system.Name,
+		Slug:       system.Slug,
+		WebhookURL: system.WebhookURL,
+		APIKeyHint: hint,
+		CreatedAt:  formatDateTime(system.CreatedAt),
+	}
+}
+
+func systemAPIKeyRevealHTML(apiKey string) string {
+	return fmt.Sprintf(
+		`<div id="system-api-key-reveal" hx-swap-oob="innerHTML" class="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4">`+
+			`<p class="text-sm font-semibold text-amber-200">Chave de API gerada — copie agora, ela não será exibida novamente:</p>`+
+			`<div class="mt-2 flex flex-wrap items-center gap-2">`+
+			`<code class="flex-1 rounded-lg bg-slate-950 px-3 py-2 font-mono text-xs text-emerald-300">%s</code>`+
+			`<button type="button" data-copy="%s" onclick="copyToClipboard(this)" class="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400">Copiar</button>`+
+			`</div></div>`,
+		template.HTMLEscapeString(apiKey),
+		template.HTMLEscapeString(apiKey),
+	)
+}
+
+func systemSelectOptionOOB(systemID, name, slug string) string {
+	escapedName := template.HTMLEscapeString(name)
+	escapedSlug := template.HTMLEscapeString(slug)
+	escapedID := template.HTMLEscapeString(systemID)
+	label := fmt.Sprintf("%s (%s)", escapedName, escapedSlug)
+	option := fmt.Sprintf(`<option value="%s">%s</option>`, escapedID, label)
+	return fmt.Sprintf(
+		`<template hx-swap-oob="beforeend:#add-channel-system-select">%s</template>`+
+			`<template hx-swap-oob="beforeend:#edit-channel-system-select">%s</template>`+
+			`<template hx-swap-oob="beforeend:#add-connection-system-select">%s</template>`+
+			`<template hx-swap-oob="beforeend:#edit-connection-system-select">%s</template>`+
+			`<template hx-swap-oob="outerHTML:#add-channel-btn"><button type="button" onclick="openModal('add-channel-modal')" class="inline-flex items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400">+ Vincular canal</button></template>`,
+		option, option, option, option,
+	)
+}
+
+func respondFormFeedback(w http.ResponseWriter, r *http.Request, targetID, message string) {
+	if isHTMX(r) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("HX-Retarget", "#"+targetID)
+		w.Header().Set("HX-Reswap", "innerHTML")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(channelModalErrorHTML(message)))
+		return
+	}
+	writeHTML(w, http.StatusBadRequest, fmt.Sprintf(`<p class="text-red-300">%s</p>`, template.HTMLEscapeString(message)))
+}
+
+func respondSystemFormError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	respondFormFeedback(w, r, "system-form-feedback", message)
+	_ = status
+}
+
+func newConnectionRow(conn model.WhatsAppConnection, systemName string) connectionRowData {
+	status := conn.Status
+	if status == "" {
+		status = model.ConnectionStatusActive
+	}
+	tokenHint := conn.AccessToken
+	if len(tokenHint) > 8 {
+		tokenHint = "…" + tokenHint[len(tokenHint)-8:]
+	}
+	if systemName == "" {
+		systemName = conn.SistemaOrigem
+	}
+	return connectionRowData{
+		ConnectionID:        conn.ID,
+		SystemID:            conn.SystemID,
+		SystemName:          systemName,
+		SystemSlug:          conn.SistemaOrigem,
+		SistemaOrigem:       conn.SistemaOrigem,
+		TenantID:            conn.TenantID,
+		WabaID:              conn.WabaID,
+		PhoneNumberID:       conn.PhoneNumberID,
+		AccessTokenHint:     tokenHint,
+		WebhookURL:          conn.WebhookURL,
+		WhatsAppPhoneNumber: conn.WhatsAppPhoneNumber,
+		Status:              status,
+		IsSuspendedSpam:     status == model.ConnectionStatusSuspendedSpam,
+		CreatedAt:           formatDateTime(conn.CreatedAt),
+	}
+}
+
+func newChannelRow(systemID, systemName, channelID, channelLabel, externalClientID, whatsappPhoneNumber, phoneNumberID, status string, createdAt time.Time) channelRowData {
 	if status == "" {
 		status = string(security.ClientChannelStatusActive)
 	}
 
 	return channelRowData{
+
+		SystemID:            systemID,
 
 		SystemName:          systemName,
 
@@ -364,6 +521,26 @@ func channelFormErrorHTML(message string) string {
 
 	return fmt.Sprintf(`<tr><td colspan="8" class="px-4 py-3 text-sm text-red-300">%s</td></tr>`, template.HTMLEscapeString(message))
 
+}
+
+func channelModalErrorHTML(message string) string {
+	return fmt.Sprintf(
+		`<div class="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">%s</div>`,
+		template.HTMLEscapeString(message),
+	)
+}
+
+func respondChannelFormError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	if isHTMX(r) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("HX-Retarget", "#channel-form-feedback")
+		w.Header().Set("HX-Reswap", "innerHTML")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(channelModalErrorHTML(message)))
+		return
+	}
+
+	writeHTML(w, status, channelFormErrorHTML(message))
 }
 
 
