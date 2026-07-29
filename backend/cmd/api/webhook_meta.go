@@ -16,6 +16,7 @@ import (
 	"github.com/whatsappgetway/gateway/internal/model"
 	"github.com/whatsappgetway/gateway/internal/provider"
 	"github.com/whatsappgetway/gateway/internal/repository"
+	"github.com/whatsappgetway/gateway/internal/security"
 	"github.com/whatsappgetway/gateway/internal/service"
 )
 
@@ -106,6 +107,20 @@ func (s *server) handleMetaWebhookEvent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	appSecret := strings.TrimSpace(os.Getenv("META_APP_SECRET"))
+	signature := r.Header.Get("X-Hub-Signature-256")
+	if !security.VerifyMetaSignature(appSecret, body, signature) {
+		log.Printf("webhook meta legacy: invalid or missing X-Hub-Signature-256 for phone_number_id %s", phoneNumberID)
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
 	channel, err := s.repo.FindClientChannelByPhoneNumberID(r.Context(), phoneNumberID)
 	if errors.Is(err, repository.ErrClientChannelNotFound) {
 		http.Error(w, "unknown phone number id", http.StatusNotFound)
@@ -117,43 +132,80 @@ func (s *server) handleMetaWebhookEvent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
-		return
-	}
-
 	var payload metaWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
-	targetURL := channel.WebhookURL
+	// Responde imediatamente à Meta (timeout de 3s); processamento em background.
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"ok":true}`))
+
+	go s.processLegacyMetaWebhookAsync(phoneNumberID, channel, payload)
+}
+
+func (s *server) processLegacyMetaWebhookAsync(
+	phoneNumberID string,
+	channel *model.ClientChannelWithSystem,
+	payload metaWebhookPayload,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	s.processDeliveryStatuses(ctx, phoneNumberID, payload)
+
+	targetURL := strings.TrimSpace(channel.WebhookURL)
 	if targetURL == "" {
 		targetURL = strings.TrimSpace(os.Getenv("MOTHER_SYSTEM_WEBHOOK_URL"))
 	}
 
-	s.processDeliveryStatuses(r.Context(), phoneNumberID, payload)
+	connectionID := ""
+	if conn, err := s.repo.FindConnectionByPhoneNumberID(ctx, phoneNumberID); err == nil {
+		connectionID = conn.ID
+	}
 
 	events := extractInboundEvents(payload)
 	for _, event := range events {
 		inboundLog := &model.MessageLog{
 			SystemID:         channel.SystemID,
+			ConnectionID:     connectionID,
 			ExternalClientID: channel.ExternalClientID,
+			MetaMessageID:    event.id,
+			AppointmentID:    "-",
 			PhoneNumber:      event.from,
 			TemplateName:     event.eventType,
 			ReceivedContent:  event.text,
 			Direction:        model.MessageDirectionInbound,
-			Status:           model.MessageStatusSent,
+			Status:           model.MessageStatusPending,
 		}
-		if err := s.repo.CreateMessageLog(r.Context(), inboundLog); err != nil {
+		if err := s.repo.CreateMessageLog(ctx, inboundLog); err != nil {
+			if errors.Is(err, repository.ErrDuplicateMessageLog) {
+				log.Printf(
+					"dedup inbound legacy %s/%s meta_message_id=%s — skipping SaaS relay",
+					channel.SystemID, channel.ExternalClientID, event.id,
+				)
+				continue
+			}
 			log.Printf(
 				"audit inbound log for system %s client %s: %v",
 				channel.SystemID,
 				channel.ExternalClientID,
 				err,
 			)
+			continue
+		}
+
+		if targetURL == "" {
+			log.Printf(
+				"skip outbound webhook: system %s channel %s has no webhook_url",
+				channel.SystemID,
+				channel.ExternalClientID,
+			)
+			if err := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusFailed); err != nil {
+				log.Printf("mark inbound legacy %s failed (no webhook): %v", inboundLog.ID, err)
+			}
+			continue
 		}
 
 		outbound := outboundWebhookPayload{
@@ -165,28 +217,24 @@ func (s *server) handleMetaWebhookEvent(w http.ResponseWriter, r *http.Request) 
 			Action:           event.action,
 		}
 
-		if targetURL == "" {
+		if err := s.forwardOutboundWebhookWithRetry(ctx, targetURL, outbound); err != nil {
 			log.Printf(
-				"skip outbound webhook: system %s channel %s has no webhook_url",
-				channel.SystemID,
-				channel.ExternalClientID,
-			)
-			continue
-		}
-
-		if err := s.forwardOutboundWebhook(r.Context(), targetURL, outbound); err != nil {
-			log.Printf(
-				"forward webhook to %s for system %s client %s: %v",
+				"forward webhook to %s for system %s client %s failed after retries: %v",
 				targetURL,
 				channel.SystemID,
 				channel.ExternalClientID,
 				err,
 			)
+			if updErr := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusFailed); updErr != nil {
+				log.Printf("mark inbound legacy %s failed: %v", inboundLog.ID, updErr)
+			}
+			continue
+		}
+
+		if err := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusSent); err != nil {
+			log.Printf("mark inbound legacy %s sent after SaaS relay: %v", inboundLog.ID, err)
 		}
 	}
-
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
 func (s *server) processDeliveryStatuses(ctx context.Context, phoneNumberID string, payload metaWebhookPayload) {
@@ -366,6 +414,32 @@ func (s *server) forwardOutboundWebhook(ctx context.Context, targetURL string, p
 	}
 
 	return nil
+}
+
+func (s *server) forwardOutboundWebhookWithRetry(ctx context.Context, targetURL string, payload outboundWebhookPayload) error {
+	delays := []time.Duration{0, 200 * time.Millisecond, 500 * time.Millisecond, time.Second}
+	var lastErr error
+	for attempt, delay := range delays {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				if lastErr != nil {
+					return lastErr
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		lastErr = s.forwardOutboundWebhook(ctx, targetURL, payload)
+		if lastErr == nil {
+			return nil
+		}
+		log.Printf("legacy saas webhook attempt %d/%d to %s failed: %v", attempt+1, len(delays), targetURL, lastErr)
+	}
+	return lastErr
 }
 
 func (s *server) createClientChannel(
