@@ -80,7 +80,14 @@ func (r *qaSaaSReceiver) Hits() int { return int(r.hits.Load()) }
 // Payloads da Meta
 // ----------------------------------------------------------------------------
 
+var qaInboundMsgSeq atomic.Int64
+
 func qaInboundTextPayload(phoneNumberID, from, text string) string {
+	id := fmt.Sprintf("wamid.QA.IN.%d", qaInboundMsgSeq.Add(1))
+	return qaInboundTextPayloadWithID(phoneNumberID, from, text, id)
+}
+
+func qaInboundTextPayloadWithID(phoneNumberID, from, text, messageID string) string {
 	return fmt.Sprintf(`{
 		"object": "whatsapp_business_account",
 		"entry": [{
@@ -88,14 +95,19 @@ func qaInboundTextPayload(phoneNumberID, from, text string) string {
 				"field": "messages",
 				"value": {
 					"metadata": {"phone_number_id": %q, "display_phone_number": "5511999990000"},
-					"messages": [{"from": %q, "type": "text", "text": {"body": %q}}]
+					"messages": [{"id": %q, "from": %q, "type": "text", "text": {"body": %q}}]
 				}
 			}]
 		}]
-	}`, phoneNumberID, from, text)
+	}`, phoneNumberID, messageID, from, text)
 }
 
 func qaInboundButtonPayload(phoneNumberID, from, payload string) string {
+	id := fmt.Sprintf("wamid.QA.BTN.%d", qaInboundMsgSeq.Add(1))
+	return qaInboundButtonPayloadWithID(phoneNumberID, from, payload, id)
+}
+
+func qaInboundButtonPayloadWithID(phoneNumberID, from, payload, messageID string) string {
 	return fmt.Sprintf(`{
 		"object": "whatsapp_business_account",
 		"entry": [{
@@ -103,11 +115,11 @@ func qaInboundButtonPayload(phoneNumberID, from, payload string) string {
 				"field": "messages",
 				"value": {
 					"metadata": {"phone_number_id": %q},
-					"messages": [{"from": %q, "type": "button", "button": {"payload": %q, "text": "Confirmar"}}]
+					"messages": [{"id": %q, "from": %q, "type": "button", "button": {"payload": %q, "text": "Confirmar"}}]
 				}
 			}]
 		}]
-	}`, phoneNumberID, from, payload)
+	}`, phoneNumberID, messageID, from, payload)
 }
 
 func qaDeliveryStatusPayload(phoneNumberID, metaMessageID, status, category string, timestamp int64) string {
@@ -501,11 +513,10 @@ func TestQAWebhookSpawnsUnboundedGoroutinesPerEvent(t *testing.T) {
 	}
 }
 
-// TestQAWebhookSaaSFailureKeepsAuditTrail simula queda do SaaS de destino
-// (500/429/timeout de conexão). O log de auditoria precisa sobreviver e a Meta
-// precisa receber 200 — mas hoje não há retry, então o evento é perdido para o
-// SaaS. Este teste fixa esse comportamento (entrega no máximo uma vez).
-func TestQAWebhookSaaSFailureKeepsAuditTrail(t *testing.T) {
+// TestQAWebhookSaaSFailureRetriesAndMarksFailed verifica retry com backoff e
+// marcação de falha em message_logs quando o SaaS de destino responde 5xx/429.
+// A Meta continua recebendo 200 imediatamente.
+func TestQAWebhookSaaSFailureRetriesAndMarksFailed(t *testing.T) {
 	cases := []struct {
 		name       string
 		saasStatus int
@@ -532,13 +543,16 @@ func TestQAWebhookSaaSFailureKeepsAuditTrail(t *testing.T) {
 				t.Fatalf("status = %d, want 200 — SaaS failure must not be pushed back to Meta", rec.Code)
 			}
 
-			qaWaitFor(t, 5*time.Second, "inbound audit row", func() bool {
+			qaWaitFor(t, 10*time.Second, "inbound audit row", func() bool {
 				return qaCountMessageLogs(t) == 1
 			})
-			qaWaitFor(t, 5*time.Second, "SaaS delivery attempt", func() bool {
-				return receiver.Hits() >= 1
+			qaWaitFor(t, 10*time.Second, "SaaS retries completed", func() bool {
+				return receiver.Hits() >= 2
 			})
-			time.Sleep(500 * time.Millisecond)
+			qaWaitFor(t, 10*time.Second, "inbound marked failed", func() bool {
+				logs := qaListMessageLogs(t)
+				return len(logs) == 1 && logs[0].Status == string(model.MessageStatusFailed)
+			})
 
 			logs := qaListMessageLogs(t)
 			if len(logs) != 1 {
@@ -548,19 +562,16 @@ func TestQAWebhookSaaSFailureKeepsAuditTrail(t *testing.T) {
 			if row.ConnectionID != conn.ID || row.Direction != string(model.MessageDirectionInbound) {
 				t.Errorf("inbound audit row misattributed: %+v", row)
 			}
-			if row.Status != string(model.MessageStatusSent) {
-				t.Logf(
-					"note: inbound row for a failed SaaS delivery is stored with status %q — there is no status distinguishing 'received but not delivered to the SaaS'",
-					row.Status,
-				)
+			if row.Status != string(model.MessageStatusFailed) {
+				t.Errorf("status = %q, want failed after SaaS relay exhaustion", row.Status)
 			}
 
 			attempts := receiver.Hits()
-			if attempts != 1 {
-				t.Errorf("SaaS delivery attempts = %d, want exactly 1 (no retry implemented)", attempts)
+			if attempts < 2 {
+				t.Errorf("SaaS delivery attempts = %d, want at least 2 retries", attempts)
 			}
 			t.Logf(
-				"finding: SaaS returned %d and the gateway made %d attempt(s) — inbound event is lost for the SaaS with no retry/DLQ and no failure marker in message_logs",
+				"SaaS returned %d; gateway made %d attempt(s) and marked inbound as failed",
 				tc.saasStatus, attempts,
 			)
 		})
@@ -683,10 +694,9 @@ func TestQAWebhookDeliveryStatusIsNotScopedToConnection(t *testing.T) {
 	t.Logf("behaviour changed: cross-connection status no longer updates the log (status=%q) — update the QA report", row.Status)
 }
 
-// TestQAWebhookDuplicateInboundIsForwardedTwice documenta a ausência de
-// deduplicação por id da mensagem: um retry da Meta gera log e entrega
-// duplicados no SaaS (risco de agendamento/confirmação em dobro).
-func TestQAWebhookDuplicateInboundIsForwardedTwice(t *testing.T) {
+// TestQAWebhookDuplicateInboundIsDeduped garante que o retry da Meta com o
+// mesmo wamid não gera segundo callback ao SaaS nem segunda linha em message_logs.
+func TestQAWebhookDuplicateInboundIsDeduped(t *testing.T) {
 	requireQADB(t)
 
 	stub := newQAMetaStub()
@@ -696,7 +706,7 @@ func TestQAWebhookDuplicateInboundIsForwardedTwice(t *testing.T) {
 	receiver := newQASaaSReceiver(t)
 	createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", receiver.URL())
 
-	payload := qaInboundButtonPayload("phone-beleza", "5511977776666", "APPT_CONFIRM")
+	payload := qaInboundButtonPayloadWithID("phone-beleza", "5511977776666", "APPT_CONFIRM", "wamid.QA.DEDUP.1")
 
 	for range 2 {
 		if rec := qaPostMetaWebhook(t, srv, payload); rec.Code != http.StatusOK {
@@ -704,23 +714,19 @@ func TestQAWebhookDuplicateInboundIsForwardedTwice(t *testing.T) {
 		}
 	}
 
-	qaWaitFor(t, 5*time.Second, "both deliveries", func() bool {
-		return len(receiver.Received()) >= 2 && qaCountMessageLogs(t) >= 2
+	qaWaitFor(t, 5*time.Second, "single delivery", func() bool {
+		return len(receiver.Received()) >= 1 && qaCountMessageLogs(t) >= 1
 	})
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond)
 
 	deliveries := receiver.Received()
 	logs := qaCountMessageLogs(t)
-	if len(deliveries) != 2 || logs != 2 {
-		t.Fatalf("behaviour changed: %d SaaS deliveries and %d logs for a duplicated Meta event — update the QA report", len(deliveries), logs)
+	if len(deliveries) != 1 || logs != 1 {
+		t.Fatalf("dedup failed: %d SaaS deliveries and %d logs for a duplicated Meta event", len(deliveries), logs)
 	}
 	if deliveries[0].Action != "CONFIRM" {
 		t.Errorf("button action = %q, want CONFIRM", deliveries[0].Action)
 	}
-	t.Logf(
-		"finding: the same Meta event delivered twice produced %d SaaS callbacks and %d message_logs rows — there is no dedup by message id (Meta retries are guaranteed to happen)",
-		len(deliveries), logs,
-	)
 }
 
 // TestQAWebhookDropsUnsupportedMessageTypes documenta que mensagens de mídia e

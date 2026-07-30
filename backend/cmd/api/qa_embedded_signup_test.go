@@ -108,13 +108,16 @@ func TestQAEmbeddedSignupStateParsing(t *testing.T) {
 		{state: "beleza_web_789", wantSlug: "beleza_web", wantTenant: "789"},
 		{state: "BELEZA_WEB_789", wantSlug: "beleza_web", wantTenant: "789"},
 		{state: "clinica_salao-42", wantSlug: "clinica", wantTenant: "salao-42"},
-		// Ambiguidade: o tenant_id fica sempre após o ÚLTIMO underscore, então um
-		// tenant_id com "_" é interpretado como parte do slug.
+		// Separador não ambíguo: tenant_id pode conter "_".
+		{state: "beleza_web::salao_1", wantSlug: "beleza_web", wantTenant: "salao_1"},
+		// Ambiguidade legada: o tenant_id fica após o ÚLTIMO underscore.
 		{state: "beleza_web_salao_1", wantSlug: "beleza_web_salao", wantTenant: "1"},
 		{state: "", wantErr: true},
 		{state: "semunderscore", wantErr: true},
 		{state: "_123", wantErr: true},
 		{state: "beleza_", wantErr: true},
+		{state: "::salao", wantErr: true},
+		{state: "beleza::", wantErr: true},
 	}
 
 	for _, tc := range cases {
@@ -252,33 +255,29 @@ func TestQAEmbeddedSignupUnsignedStateTakesOverExistingTenant(t *testing.T) {
 	)
 }
 
-// TestQAEmbeddedSignupTenantIDWithUnderscoreIsUnreachable documenta que tenants
-// cujo id contém "_" não conseguem concluir o onboarding.
-func TestQAEmbeddedSignupTenantIDWithUnderscoreIsUnreachable(t *testing.T) {
+// TestQAEmbeddedSignupTenantIDWithUnderscoreViaDoubleColon garante onboarding
+// de tenant_id contendo "_" via separador "::".
+func TestQAEmbeddedSignupTenantIDWithUnderscoreViaDoubleColon(t *testing.T) {
 	requireQADB(t)
 
 	stub := qaEmbeddedSignupMetaStub("token-x", "waba-x", "phone-x", "5511999990000")
 	srv := newQAServer(t, stub, 100)
 	qaSetEmbeddedSignupEnv(t)
 
-	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	receiver := newQASaaSReceiver(t)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", receiver.URL())
 
-	rec := qaGetEmbeddedSignupCallback(t, srv, "code=abc&state=beleza_web_salao_1", nil)
-	if rec.Code == http.StatusOK {
-		if conn, ok := qaFindConnection(t, beleza.ID, "salao_1"); ok {
-			t.Logf("behaviour changed: tenant with underscore was bound correctly (%+v) — update the QA report", conn)
-			return
-		}
-		t.Fatalf("callback returned 200 but no connection for tenant salao_1")
+	rec := qaGetEmbeddedSignupCallback(t, srv, "code=abc&state=beleza_web::salao_1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
-
-	if _, ok := qaFindConnection(t, beleza.ID, "salao_1"); ok {
-		t.Fatal("unexpected connection created for tenant salao_1")
+	conn, ok := qaFindConnection(t, beleza.ID, "salao_1")
+	if !ok {
+		t.Fatal("connection was not persisted for tenant salao_1")
 	}
-	t.Logf(
-		"finding: state \"beleza_web_salao_1\" was parsed as slug \"beleza_web_salao\" and rejected with HTTP %d — any tenant_id containing \"_\" cannot be onboarded",
-		rec.Code,
-	)
+	if conn.PhoneNumberID != "phone-x" {
+		t.Errorf("phone_number_id = %q, want phone-x", conn.PhoneNumberID)
+	}
 }
 
 // TestQAEmbeddedSignupIgnoresAcceptJSON documenta que a negociação de conteúdo

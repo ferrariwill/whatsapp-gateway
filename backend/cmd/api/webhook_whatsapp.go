@@ -14,6 +14,7 @@ import (
 
 	"github.com/whatsappgetway/gateway/internal/model"
 	"github.com/whatsappgetway/gateway/internal/repository"
+	"github.com/whatsappgetway/gateway/internal/security"
 	"github.com/whatsappgetway/gateway/internal/service"
 )
 
@@ -68,6 +69,14 @@ func (s *server) handleWhatsAppWebhookEvent(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	appSecret := strings.TrimSpace(os.Getenv("META_APP_SECRET"))
+	signature := r.Header.Get("X-Hub-Signature-256")
+	if !security.VerifyMetaSignature(appSecret, body, signature) {
+		log.Printf("webhook whatsapp: invalid or missing X-Hub-Signature-256")
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
 	var payload unifiedMetaWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -104,10 +113,10 @@ func (s *server) handleWhatsAppWebhookEvent(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *server) processWebhookPayloadAsync(conn *model.WhatsAppConnection, payload unifiedMetaWebhookPayload) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	s.processDeliveryStatusesFromPayload(ctx, payload)
+	s.processDeliveryStatusesFromPayload(ctx, conn, payload)
 
 	targetURL := strings.TrimSpace(conn.WebhookURL)
 	if targetURL == "" {
@@ -121,19 +130,29 @@ func (s *server) processWebhookPayloadAsync(conn *model.WhatsAppConnection, payl
 			ConnectionID:     conn.ID,
 			SistemaOrigem:    conn.SistemaOrigem,
 			ExternalClientID: conn.TenantID,
+			MetaMessageID:    event.id,
 			AppointmentID:    "-",
 			PhoneNumber:      event.from,
 			TemplateName:     event.eventType,
 			ReceivedContent:  event.text,
 			Direction:        model.MessageDirectionInbound,
-			Status:           model.MessageStatusSent,
+			Status:           model.MessageStatusPending,
 		}
 		if err := s.repo.CreateMessageLog(ctx, inboundLog); err != nil {
+			if errors.Is(err, repository.ErrDuplicateMessageLog) {
+				log.Printf("dedup inbound %s/%s meta_message_id=%s — skipping SaaS relay",
+					conn.SistemaOrigem, conn.TenantID, event.id)
+				continue
+			}
 			log.Printf("audit inbound %s/%s: %v", conn.SistemaOrigem, conn.TenantID, err)
+			continue
 		}
 
 		if targetURL == "" {
 			log.Printf("skip saas webhook: %s/%s has no webhook_url", conn.SistemaOrigem, conn.TenantID)
+			if err := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusFailed); err != nil {
+				log.Printf("mark inbound %s failed (no webhook): %v", inboundLog.ID, err)
+			}
 			continue
 		}
 
@@ -147,8 +166,17 @@ func (s *server) processWebhookPayloadAsync(conn *model.WhatsAppConnection, payl
 			Action:        event.action,
 		}
 
-		if err := s.forwardSaaSWebhook(ctx, targetURL, outbound); err != nil {
-			log.Printf("forward webhook to %s for %s/%s: %v", targetURL, conn.SistemaOrigem, conn.TenantID, err)
+		if err := s.forwardSaaSWebhookWithRetry(ctx, targetURL, outbound); err != nil {
+			log.Printf("forward webhook to %s for %s/%s failed after retries: %v",
+				targetURL, conn.SistemaOrigem, conn.TenantID, err)
+			if updErr := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusFailed); updErr != nil {
+				log.Printf("mark inbound %s failed: %v", inboundLog.ID, updErr)
+			}
+			continue
+		}
+
+		if err := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusSent); err != nil {
+			log.Printf("mark inbound %s sent after SaaS relay: %v", inboundLog.ID, err)
 		}
 	}
 }
@@ -164,7 +192,11 @@ func extractPhoneNumberIDFromPayload(payload unifiedMetaWebhookPayload) string {
 	return ""
 }
 
-func (s *server) processDeliveryStatusesFromPayload(ctx context.Context, payload unifiedMetaWebhookPayload) {
+func (s *server) processDeliveryStatusesFromPayload(
+	ctx context.Context,
+	conn *model.WhatsAppConnection,
+	payload unifiedMetaWebhookPayload,
+) {
 	for _, entry := range payload.Entry {
 		for _, change := range entry.Changes {
 			if change.Field != "messages" {
@@ -188,9 +220,12 @@ func (s *server) processDeliveryStatusesFromPayload(ctx context.Context, payload
 				metaCost := service.MetaCostForCategory(category)
 				deliveredAt := parseMetaWebhookTimestamp(statusUpdate.Timestamp)
 
-				if err := s.repo.MarkMessageLogDelivered(ctx, metaMessageID, model.MessageCategory(category), metaCost, deliveredAt); err != nil {
+				if err := s.repo.MarkMessageLogDelivered(
+					ctx, metaMessageID, conn.ID, model.MessageCategory(category), metaCost, deliveredAt,
+				); err != nil {
 					if errors.Is(err, repository.ErrMessageLogNotFound) {
-						log.Printf("delivery webhook for unknown meta_message_id %s", metaMessageID)
+						log.Printf("delivery webhook for unknown/unscoped meta_message_id %s connection=%s",
+							metaMessageID, conn.ID)
 						continue
 					}
 					log.Printf("mark message %s delivered: %v", metaMessageID, err)
@@ -216,6 +251,32 @@ func extractInboundEventsFromUnified(payload unifiedMetaWebhookPayload) []inboun
 		}
 	}
 	return events
+}
+
+func (s *server) forwardSaaSWebhookWithRetry(ctx context.Context, targetURL string, payload saasWebhookPayload) error {
+	delays := []time.Duration{0, 200 * time.Millisecond, 500 * time.Millisecond, time.Second}
+	var lastErr error
+	for attempt, delay := range delays {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				if lastErr != nil {
+					return lastErr
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		lastErr = s.forwardSaaSWebhook(ctx, targetURL, payload)
+		if lastErr == nil {
+			return nil
+		}
+		log.Printf("saas webhook attempt %d/%d to %s failed: %v", attempt+1, len(delays), targetURL, lastErr)
+	}
+	return lastErr
 }
 
 func (s *server) forwardSaaSWebhook(ctx context.Context, targetURL string, payload saasWebhookPayload) error {

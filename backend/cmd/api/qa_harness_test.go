@@ -261,6 +261,9 @@ func newQAServer(t *testing.T, stub *qaMetaStub, maxMessagesPerMinute int) *serv
 	t.Helper()
 	t.Setenv("ADMIN_PHONE_NUMBER", "")
 	t.Setenv("MOTHER_SYSTEM_WEBHOOK_URL", "")
+	if strings.TrimSpace(os.Getenv("META_APP_SECRET")) == "" {
+		t.Setenv("META_APP_SECRET", "qa-app-secret")
+	}
 
 	repo := repository.NewPostgresRepository(qaDB)
 	return &server{
@@ -350,6 +353,11 @@ func qaPostMetaWebhook(t *testing.T, srv *server, rawPayload string) *httptest.R
 
 	req := httptest.NewRequest(http.MethodPost, "/webhook/whatsapp", strings.NewReader(rawPayload))
 	req.Header.Set("Content-Type", "application/json")
+	secret := strings.TrimSpace(os.Getenv("META_APP_SECRET"))
+	if secret == "" {
+		secret = "qa-app-secret"
+	}
+	req.Header.Set("X-Hub-Signature-256", security.SignMetaPayload(secret, []byte(rawPayload)))
 
 	rec := httptest.NewRecorder()
 	srv.handleWhatsAppWebhookEvent(rec, req)

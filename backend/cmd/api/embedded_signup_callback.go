@@ -15,6 +15,7 @@ import (
 	"github.com/whatsappgetway/gateway/internal/model"
 	"github.com/whatsappgetway/gateway/internal/provider"
 	"github.com/whatsappgetway/gateway/internal/repository"
+	"github.com/whatsappgetway/gateway/internal/security"
 )
 
 type embeddedSignupConnectionPayload struct {
@@ -31,7 +32,9 @@ type embeddedSignupConnectionPayload struct {
 }
 
 // handleEmbeddedSignupCallback recebe o redirect OAuth do Embedded Signup da Meta.
-// state esperado: "{slug}_{tenant_id}" (ex.: beleza_123, clinica_42, beleza_web_789).
+// state aceito:
+//   - assinado: security.SignEmbeddedSignupState (recomendado)
+//   - legado: "{slug}_{tenant_id}" ou "{slug}::{tenant_id}" (tenant com "_" só via "::" ou assinado)
 func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Request) {
 	if errMsg := strings.TrimSpace(r.URL.Query().Get("error")); errMsg != "" {
 		reason := strings.TrimSpace(r.URL.Query().Get("error_description"))
@@ -39,35 +42,18 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 			reason = strings.TrimSpace(r.URL.Query().Get("error_reason"))
 		}
 		log.Printf("embedded signup denied: %s (%s)", errMsg, reason)
-		writeEmbeddedSignupResult(w, http.StatusBadRequest, false, "cadastro cancelado ou negado pela Meta", reason)
+		writeEmbeddedSignupResult(w, r, http.StatusBadRequest, false, "cadastro cancelado ou negado pela Meta", reason)
 		return
 	}
 
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	state := strings.TrimSpace(r.URL.Query().Get("state"))
 	if code == "" {
-		writeEmbeddedSignupResult(w, http.StatusBadRequest, false, "code ausente no callback", "")
+		writeEmbeddedSignupResult(w, r, http.StatusBadRequest, false, "code ausente no callback", "")
 		return
 	}
 	if state == "" {
-		writeEmbeddedSignupResult(w, http.StatusBadRequest, false, "state ausente no callback", "")
-		return
-	}
-
-	slug, tenantID, err := parseEmbeddedSignupState(state)
-	if err != nil {
-		writeEmbeddedSignupResult(w, http.StatusBadRequest, false, err.Error(), "")
-		return
-	}
-
-	system, err := s.repo.FindSystemBySlug(r.Context(), slug)
-	if errors.Is(err, repository.ErrSystemSlugNotFound) {
-		writeEmbeddedSignupResult(w, http.StatusBadRequest, false, fmt.Sprintf("aplicação mãe desconhecida: slug %q não cadastrado no gateway", slug), "")
-		return
-	}
-	if err != nil {
-		log.Printf("embedded signup lookup system %s: %v", slug, err)
-		writeEmbeddedSignupResult(w, http.StatusInternalServerError, false, "erro ao identificar aplicação mãe", "")
+		writeEmbeddedSignupResult(w, r, http.StatusBadRequest, false, "state ausente no callback", "")
 		return
 	}
 
@@ -76,7 +62,24 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 	redirectURI := strings.TrimSpace(os.Getenv("META_EMBEDDED_SIGNUP_REDIRECT_URI"))
 	if appID == "" || appSecret == "" || redirectURI == "" {
 		log.Printf("embedded signup missing META_APP_ID/SECRET/REDIRECT_URI")
-		writeEmbeddedSignupResult(w, http.StatusInternalServerError, false, "configuração Meta incompleta no gateway", "")
+		writeEmbeddedSignupResult(w, r, http.StatusInternalServerError, false, "configuração Meta incompleta no gateway", "")
+		return
+	}
+
+	slug, tenantID, stateSigned, err := resolveEmbeddedSignupState(appSecret, state)
+	if err != nil {
+		writeEmbeddedSignupResult(w, r, http.StatusBadRequest, false, err.Error(), "")
+		return
+	}
+
+	system, err := s.repo.FindSystemBySlug(r.Context(), slug)
+	if errors.Is(err, repository.ErrSystemSlugNotFound) {
+		writeEmbeddedSignupResult(w, r, http.StatusBadRequest, false, fmt.Sprintf("aplicação mãe desconhecida: slug %q não cadastrado no gateway", slug), "")
+		return
+	}
+	if err != nil {
+		log.Printf("embedded signup lookup system %s: %v", slug, err)
+		writeEmbeddedSignupResult(w, r, http.StatusInternalServerError, false, "erro ao identificar aplicação mãe", "")
 		return
 	}
 
@@ -87,15 +90,34 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 	accessToken, err := metaProvider.ExchangeOAuthCode(ctx, appID, appSecret, code, redirectURI)
 	if err != nil {
 		log.Printf("embedded signup token exchange %s/%s: %v", slug, tenantID, err)
-		writeEmbeddedSignupResult(w, http.StatusBadGateway, false, "falha ao trocar code por access token", err.Error())
+		writeEmbeddedSignupResult(w, r, http.StatusBadGateway, false, "falha ao trocar code por access token", err.Error())
 		return
 	}
 
 	assets, err := metaProvider.ResolveEmbeddedSignupAssets(ctx, appID, appSecret, accessToken)
 	if err != nil {
 		log.Printf("embedded signup resolve assets %s/%s: %v", slug, tenantID, err)
-		writeEmbeddedSignupResult(w, http.StatusBadGateway, false, "falha ao obter WABA e phone_number_id", err.Error())
+		writeEmbeddedSignupResult(w, r, http.StatusBadGateway, false, "falha ao obter WABA e phone_number_id", err.Error())
 		return
+	}
+
+	existing, findErr := s.repo.FindConnectionBySystemAndTenant(ctx, system.ID, tenantID)
+	if findErr != nil && !errors.Is(findErr, repository.ErrConnectionNotFound) {
+		log.Printf("embedded signup lookup existing %s/%s: %v", slug, tenantID, findErr)
+		writeEmbeddedSignupResult(w, r, http.StatusInternalServerError, false, "erro ao verificar conexão existente", "")
+		return
+	}
+	if existing != nil {
+		identityChange := existing.PhoneNumberID != assets.PhoneNumberID || existing.WabaID != assets.WabaID
+		if identityChange && !stateSigned {
+			log.Printf(
+				"embedded signup blocked identity takeover %s/%s: existing phone=%s waba=%s, incoming phone=%s waba=%s",
+				slug, tenantID, existing.PhoneNumberID, existing.WabaID, assets.PhoneNumberID, assets.WabaID,
+			)
+			writeEmbeddedSignupResult(w, r, http.StatusConflict, false,
+				"conexão já ativa com outro número WhatsApp; reconectar exige state OAuth assinado", "")
+			return
+		}
 	}
 
 	webhookURL := strings.TrimSpace(system.WebhookURL)
@@ -117,37 +139,60 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 
 	if err := s.repo.UpsertWhatsAppConnection(ctx, conn); err != nil {
 		log.Printf("embedded signup upsert %s/%s: %v", slug, tenantID, err)
-		writeEmbeddedSignupResult(w, http.StatusInternalServerError, false, "falha ao salvar conexão no banco", err.Error())
+		writeEmbeddedSignupResult(w, r, http.StatusInternalServerError, false, "falha ao salvar conexão no banco", err.Error())
 		return
 	}
 
 	if err := s.notifySaaSWhatsAppActive(ctx, conn); err != nil {
 		log.Printf("embedded signup notify saas %s/%s: %v", slug, tenantID, err)
-		writeEmbeddedSignupResult(w, http.StatusBadGateway, false, "conexão salva, mas falha ao notificar SaaS", err.Error())
+		writeEmbeddedSignupResult(w, r, http.StatusBadGateway, false, "conexão salva, mas falha ao notificar SaaS", err.Error())
 		return
 	}
 
-	log.Printf("embedded signup completed: system=%s tenant=%s waba=%s phone=%s", slug, tenantID, conn.WabaID, conn.PhoneNumberID)
-	writeEmbeddedSignupResult(w, http.StatusOK, true, fmt.Sprintf("O tenant %s (%s) agora está com o WhatsApp ativo", tenantID, system.Name), "")
+	log.Printf("embedded signup completed: system=%s tenant=%s waba=%s phone=%s signed_state=%v", slug, tenantID, conn.WabaID, conn.PhoneNumberID, stateSigned)
+	writeEmbeddedSignupResult(w, r, http.StatusOK, true, fmt.Sprintf("O tenant %s (%s) agora está com o WhatsApp ativo", tenantID, system.Name), "")
 }
 
-// parseEmbeddedSignupState extrai slug da aplicação mãe e tenant_id de state no formato {slug}_{tenant_id}.
-// O tenant_id fica após o último underscore (ex.: beleza_web_789 → slug=beleza_web, tenant=789).
+// resolveEmbeddedSignupState prefere state HMAC assinado; fallback legado para compatibilidade.
+func resolveEmbeddedSignupState(appSecret, state string) (slug, tenantID string, signed bool, err error) {
+	slug, tenantID, signed, err = security.VerifyEmbeddedSignupState(appSecret, state)
+	if err != nil {
+		return "", "", false, err
+	}
+	if signed {
+		return slug, tenantID, true, nil
+	}
+	slug, tenantID, err = parseEmbeddedSignupState(state)
+	return slug, tenantID, false, err
+}
+
+// parseEmbeddedSignupState extrai slug e tenant_id.
+// Preferir "{slug}::{tenant_id}" quando o tenant_id contém "_".
+// Legado "{slug}_{tenant_id}" usa o último underscore (ambíguo com "_" no tenant).
 func parseEmbeddedSignupState(state string) (slug, tenantID string, err error) {
 	state = strings.TrimSpace(state)
 	if state == "" {
 		return "", "", errors.New("state ausente no callback")
 	}
 
+	if idx := strings.Index(state, "::"); idx > 0 && idx < len(state)-2 {
+		slug = strings.TrimSpace(strings.ToLower(state[:idx]))
+		tenantID = strings.TrimSpace(state[idx+2:])
+		if slug == "" || tenantID == "" {
+			return "", "", fmt.Errorf("state inválido: esperado {slug}::{tenant_id}")
+		}
+		return slug, tenantID, nil
+	}
+
 	idx := strings.LastIndex(state, "_")
 	if idx <= 0 || idx >= len(state)-1 {
-		return "", "", fmt.Errorf("state inválido: esperado {slug}_{tenant_id} (ex.: beleza_123, beleza_web_789)")
+		return "", "", fmt.Errorf("state inválido: esperado {slug}_{tenant_id} ou {slug}::{tenant_id} (ex.: beleza_123, beleza_web::salao_1)")
 	}
 
 	slug = strings.TrimSpace(strings.ToLower(state[:idx]))
 	tenantID = strings.TrimSpace(state[idx+1:])
 	if slug == "" || tenantID == "" {
-		return "", "", fmt.Errorf("state inválido: slug e tenant_id são obrigatórios em {slug}_{tenant_id}")
+		return "", "", fmt.Errorf("state inválido: slug e tenant_id são obrigatórios")
 	}
 
 	return slug, tenantID, nil
@@ -210,8 +255,11 @@ func (s *server) notifySaaSWhatsAppActive(ctx context.Context, conn *model.Whats
 	return nil
 }
 
-func writeEmbeddedSignupResult(w http.ResponseWriter, status int, success bool, message, detail string) {
-	accept := strings.ToLower(strings.TrimSpace(w.Header().Get("Accept")))
+func writeEmbeddedSignupResult(w http.ResponseWriter, r *http.Request, status int, success bool, message, detail string) {
+	accept := ""
+	if r != nil {
+		accept = strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+	}
 	if strings.Contains(accept, "application/json") {
 		writeJSON(w, status, map[string]any{
 			"success": success,

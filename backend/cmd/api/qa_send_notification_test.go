@@ -560,11 +560,9 @@ func TestQASendNotificationBlocksSuspendedConnectionFromDatabase(t *testing.T) {
 	}
 }
 
-// TestQASendNotificationMonthlyLimitIsNotEnforced documenta que a rota
-// principal /send-notification não consulta o limite mensal por tenant
-// (MONTHLY_MESSAGE_LIMIT), diferente de POST /v1/messages/send-template.
-// Ao implementar o bloqueio, este teste deve passar a esperar 429.
-func TestQASendNotificationMonthlyLimitIsNotEnforced(t *testing.T) {
+// TestQASendNotificationEnforcesMonthlyLimit garante que /send-notification
+// respeita MONTHLY_MESSAGE_LIMIT por tenant (mesmo critério de /v1/messages/send-template).
+func TestQASendNotificationEnforcesMonthlyLimit(t *testing.T) {
 	requireQADB(t)
 
 	t.Setenv("MONTHLY_MESSAGE_LIMIT", "2")
@@ -581,6 +579,7 @@ func TestQASendNotificationMonthlyLimitIsNotEnforced(t *testing.T) {
 
 	const attempts = 5
 	accepted := 0
+	rejected := 0
 	for i := range attempts {
 		rec := qaPostSendNotification(t, srv, beleza.APIKey, map[string]any{
 			"tenant_id":      "tenant-1",
@@ -588,16 +587,20 @@ func TestQASendNotificationMonthlyLimitIsNotEnforced(t *testing.T) {
 			"appointment_id": fmt.Sprintf("appt-%d", i),
 			"template_name":  "confirma_agendamento",
 		})
-		if rec.Code == http.StatusOK {
+		switch rec.Code {
+		case http.StatusOK:
 			accepted++
+		case http.StatusTooManyRequests:
+			rejected++
+		default:
+			t.Fatalf("unexpected status %d on attempt %d (body=%s)", rec.Code, i, rec.Body.String())
 		}
 	}
 
-	if accepted != attempts {
-		t.Fatalf("accepted = %d, want %d — behaviour changed, monthly limit is now enforced on /send-notification", accepted, attempts)
+	if accepted != 2 {
+		t.Fatalf("accepted = %d, want 2 under MONTHLY_MESSAGE_LIMIT=2", accepted)
 	}
-	t.Logf(
-		"finding: MONTHLY_MESSAGE_LIMIT=%d but %d messages were accepted on /send-notification (limit only checked in /v1/messages/send-template)",
-		srv.usage.MonthlyLimit(), accepted,
-	)
+	if rejected != 3 {
+		t.Fatalf("rejected = %d, want 3", rejected)
+	}
 }

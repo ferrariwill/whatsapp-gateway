@@ -18,6 +18,7 @@ var (
 	ErrUserNotFound          = errors.New("user not found")
 	ErrClientChannelNotFound = errors.New("client channel not found")
 	ErrMessageLogNotFound    = errors.New("message log not found")
+	ErrDuplicateMessageLog   = errors.New("duplicate message log")
 )
 
 type PostgresRepository struct {
@@ -504,6 +505,9 @@ func (r *PostgresRepository) CreateMessageLog(ctx context.Context, log *model.Me
 		string(log.Direction), messageCategory, log.Status, log.MetaCost,
 	).Scan(&log.ID, &log.CreatedAt)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrDuplicateMessageLog
+		}
 		return fmt.Errorf("insert message log: %w", err)
 	}
 	return nil
@@ -627,21 +631,24 @@ func (r *PostgresRepository) CountMonthlyMessagesForClient(
 func (r *PostgresRepository) MarkMessageLogDelivered(
 	ctx context.Context,
 	metaMessageID string,
+	connectionID string,
 	messageCategory model.MessageCategory,
 	metaCost float64,
 	deliveredAt time.Time,
 ) error {
 	const query = `
 		UPDATE message_logs
-		SET status = $2,
-		    message_category = $3,
-		    meta_cost = $4,
-		    delivered_at = $5
+		SET status = $3,
+		    message_category = $4,
+		    meta_cost = $5,
+		    delivered_at = $6
 		WHERE meta_message_id = $1
+		  AND connection_id = $2
 		  AND status <> 'delivered'
 	`
 	result, err := r.db.ExecContext(ctx, query,
 		metaMessageID,
+		connectionID,
 		model.MessageStatusDelivered,
 		string(messageCategory),
 		metaCost,
@@ -651,6 +658,30 @@ func (r *PostgresRepository) MarkMessageLogDelivered(
 		return fmt.Errorf("update message log delivered: %w", err)
 	}
 
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrMessageLogNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) UpdateMessageLogStatus(
+	ctx context.Context,
+	id string,
+	status model.MessageStatus,
+) error {
+	const query = `
+		UPDATE message_logs
+		SET status = $2
+		WHERE id = $1
+	`
+	result, err := r.db.ExecContext(ctx, query, id, status)
+	if err != nil {
+		return fmt.Errorf("update message log status: %w", err)
+	}
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("rows affected: %w", err)

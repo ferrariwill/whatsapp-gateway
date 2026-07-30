@@ -91,10 +91,25 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	withinLimit, err := s.usage.CheckMonthlyLimit(r.Context(), conn.SystemID, conn.TenantID)
+	if err != nil {
+		log.Printf("check monthly limit %s/%s: %v", system.Slug, req.TenantID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to check monthly message limit"})
+		return
+	}
+	if !withinLimit {
+		writeJSON(w, http.StatusTooManyRequests, errorResponse{
+			Error: fmt.Sprintf("monthly message limit of %d exceeded for this tenant", s.usage.MonthlyLimit()),
+		})
+		return
+	}
+
 	result := s.rateLimiter.RecordAttempt(conn.SystemID, conn.TenantID)
 	if !result.Allowed {
 		if result.TriggerAlert {
-			_ = s.repo.SuspendConnectionForSpam(r.Context(), conn.ID)
+			if err := s.repo.SuspendConnectionForSpam(r.Context(), conn.ID); err != nil {
+				log.Printf("suspend connection for spam %s/%s: %v", system.Slug, req.TenantID, err)
+			}
 			metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 			go s.notifySpamForConnection(conn, result.Count, metaProvider)
 		}
