@@ -37,11 +37,7 @@ func (s *server) enforceConnectionSpamProtection(
 ) bool {
 	if conn.Status == model.ConnectionStatusSuspendedSpam ||
 		s.rateLimiter.IsBlacklisted(conn.SystemID, conn.TenantID) {
-		if err := s.persistRateLimitedOutbound(r.Context(), conn, audit); err != nil {
-			log.Printf("persist blocked outbound attempt for connection %s: %v", conn.ID, err)
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist rejected attempt"})
-			return false
-		}
+		s.auditRateLimitedOutbound(r.Context(), conn, audit, "spam-protection/blocked")
 		writeJSON(w, http.StatusTooManyRequests, errorResponse{
 			Error: "tenant temporarily blocked due to spam protection",
 		})
@@ -53,11 +49,7 @@ func (s *server) enforceConnectionSpamProtection(
 		return true
 	}
 
-	if err := s.persistRateLimitedOutbound(r.Context(), conn, audit); err != nil {
-		log.Printf("persist rate-limited outbound attempt for connection %s: %v", conn.ID, err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist rejected attempt"})
-		return false
-	}
+	s.auditRateLimitedOutbound(r.Context(), conn, audit, "spam-protection/rate-limited")
 
 	if result.TriggerAlert {
 		if err := s.repo.SuspendConnectionForSpam(r.Context(), conn.ID); err != nil {

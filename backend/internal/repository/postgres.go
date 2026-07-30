@@ -665,6 +665,11 @@ type PendingInboundLog struct {
 // next_attempt_at vencido, ou relaying cujo lease expirou (claim órfão).
 // O claim grava status=relaying + sweep_claimed_at e incrementa relay_attempts
 // ANTES de commit — assim duas instâncias não podem fazer POST concorrente.
+//
+// maxAttempts limita apenas o ramo de failed retryable. O ramo órfão ignora o
+// teto de propósito: filtrar por relay_attempts aqui deixaria a linha presa em
+// relaying para sempre, invisível para o DLQ. Quem aplica o teto ao órfão é o
+// sweep, que encerra como exhausted a linha reclaimada acima do limite.
 func (r *PostgresRepository) ClaimStalePendingInboundLogs(
 	ctx context.Context,
 	olderThan time.Time,

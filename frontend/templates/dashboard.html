@@ -48,7 +48,7 @@
           <thead class="bg-slate-950/80">
             <tr>
               <th class="px-4 py-3 text-left font-medium text-slate-400">Nome</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Slug (OAuth state)</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Slug</th>
               <th class="px-4 py-3 text-left font-medium text-slate-400">API Key (hash)</th>
               <th class="px-4 py-3 text-left font-medium text-slate-400">Webhook URL</th>
               <th class="px-4 py-3 text-left font-medium text-slate-400">Cadastrado em</th>
@@ -329,7 +329,7 @@
       <div>
         <label class="mb-1 block text-sm text-slate-300">Slug (identificador único)</label>
         <input name="slug" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-emerald-300 outline-none focus:border-emerald-500/50" placeholder="beleza_web (opcional — gerado do nome)">
-        <p class="mt-1 text-xs text-slate-500">Usado no OAuth state: <code class="text-emerald-300">{slug}_{tenant_id}</code></p>
+        <p class="mt-1 text-xs text-slate-500">Identifica a aplicação no Embedded Signup. O state OAuth é emitido por <code class="text-emerald-300">POST /v1/embedded-signup/state</code> — não monte o state à mão.</p>
       </div>
       <div>
         <label class="mb-1 block text-sm text-slate-300">Webhook URL (opcional)</label>
@@ -367,7 +367,7 @@
       <div>
         <label class="mb-1 block text-sm text-slate-300">Slug (identificador único)</label>
         <input name="slug" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-emerald-300 outline-none focus:border-emerald-500/50">
-        <p class="mt-1 text-xs text-slate-500">Embedded Signup: state = <code class="text-emerald-300">{slug}_{tenant_id}</code></p>
+        <p class="mt-1 text-xs text-slate-500">Embedded Signup: peça o state assinado em <code class="text-emerald-300">POST /v1/embedded-signup/state</code> com a API Key da aplicação.</p>
       </div>
       <div>
         <label class="mb-1 block text-sm text-slate-300">Webhook URL</label>
