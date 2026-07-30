@@ -45,6 +45,12 @@ func TestQALegacyMetaWebhookRejectsInvalidSignature(t *testing.T) {
 	beleza := createQASystem(t, "Beleza Legacy", "beleza_legacy", receiver.URL())
 	createQAClientChannel(t, beleza, "salao-1", "phone-legacy")
 
+	// A rejeição precisa vir de MAC divergente, não de fail-closed por segredo
+	// vazio: sem esta asserção o teste passaria pelo motivo errado.
+	if qaMetaAppSecret(t) == "" {
+		t.Fatal("META_APP_SECRET must be set for this test to prove signature mismatch, not fail-closed")
+	}
+
 	payload := qaInboundButtonPayload("phone-legacy", "5511900000000", "APPT_CONFIRM")
 
 	req := httptest.NewRequest(
@@ -81,10 +87,10 @@ func TestQALegacyMetaWebhookAcceptsValidSignatureAndRelays(t *testing.T) {
 	receiver := newQASaaSReceiver(t)
 	beleza := createQASystem(t, "Beleza Legacy", "beleza_legacy", receiver.URL())
 	createQAClientChannel(t, beleza, "salao-1", "phone-legacy")
-	createQAConnection(t, beleza, "salao-1", "phone-legacy", "token-legacy", receiver.URL())
+	conn := createQAConnection(t, beleza, "salao-1", "phone-legacy", "token-legacy", receiver.URL())
 
 	payload := qaInboundButtonPayloadWithID("phone-legacy", "5511900000000", "APPT_CONFIRM", "wamid.QA.LEGACY.1")
-	secret := "qa-app-secret"
+	secret := qaMetaAppSecret(t)
 
 	req := httptest.NewRequest(
 		http.MethodPost,
@@ -119,5 +125,15 @@ func TestQALegacyMetaWebhookAcceptsValidSignatureAndRelays(t *testing.T) {
 	}
 	if row.TenantID != "salao-1" {
 		t.Errorf("external_client_id = %q, want salao-1", row.TenantID)
+	}
+	// connection_id é o escopo de MarkMessageLogDelivered: sem ele a linha sai
+	// do billing por conexão.
+	if row.ConnectionID != conn.ID {
+		t.Errorf("connection_id = %q, want %q", row.ConnectionID, conn.ID)
+	}
+	// sistema_origem alimenta idx_message_logs_sistema_origem e os filtros do
+	// painel; o path legado não preenchia.
+	if row.SistemaOrigem != beleza.Slug {
+		t.Errorf("sistema_origem = %q, want %q", row.SistemaOrigem, beleza.Slug)
 	}
 }

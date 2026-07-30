@@ -628,6 +628,120 @@ func (r *PostgresRepository) CountMonthlyMessagesForClient(
 	return count, nil
 }
 
+// PendingInboundLog é uma linha inbound claimada pelo sweep para reprocessar o
+// repasse. TargetWebhookURL resolve conexão → aplicação mãe; o fallback
+// MOTHER_SYSTEM_WEBHOOK_URL é aplicado em Go, igual ao caminho em tempo real.
+type PendingInboundLog struct {
+	ID               string
+	SystemID         string
+	ConnectionID     string
+	SistemaOrigem    string
+	ExternalClientID string
+	MetaMessageID    string
+	PhoneNumber      string
+	EventType        string
+	ReceivedContent  string
+	TargetWebhookURL string
+	CreatedAt        time.Time
+	SweepClaimedAt   time.Time
+}
+
+// ClaimStalePendingInboundLogs claima atomicamente um lote de linhas inbound
+// elegíveis: pending mais velhas que olderThan, ou relaying cujo lease expirou
+// (claim órfão). O claim grava status=relaying + sweep_claimed_at ANTES de
+// commit — assim duas instâncias não podem selecionar a mesma linha e ambas
+// fazerem POST. FOR UPDATE SKIP LOCKED + UPDATE na mesma transação.
+func (r *PostgresRepository) ClaimStalePendingInboundLogs(
+	ctx context.Context,
+	olderThan time.Time,
+	orphanBefore time.Time,
+	limit int,
+) ([]PendingInboundLog, error) {
+	const query = `
+		WITH candidates AS (
+			SELECT ml.id
+			FROM message_logs ml
+			WHERE ml.direction = 'INBOUND'
+			  AND (
+			        (ml.status = 'pending' AND ml.created_at < $1)
+			     OR (ml.status = 'relaying' AND ml.sweep_claimed_at IS NOT NULL AND ml.sweep_claimed_at < $2)
+			  )
+			ORDER BY ml.created_at ASC
+			LIMIT $3
+			FOR UPDATE SKIP LOCKED
+		),
+		claimed AS (
+			UPDATE message_logs ml
+			SET status = 'relaying',
+			    sweep_claimed_at = NOW()
+			FROM candidates
+			WHERE ml.id = candidates.id
+			RETURNING
+				ml.id,
+				ml.system_id,
+				ml.connection_id,
+				ml.sistema_origem,
+				ml.external_client_id,
+				ml.meta_message_id,
+				ml.phone_number,
+				ml.template_name,
+				ml.received_content,
+				ml.created_at,
+				ml.sweep_claimed_at
+		)
+		SELECT
+			claimed.id::text,
+			COALESCE(claimed.system_id::text, ''),
+			COALESCE(claimed.connection_id::text, ''),
+			COALESCE(claimed.sistema_origem, ''),
+			COALESCE(claimed.external_client_id, ''),
+			COALESCE(claimed.meta_message_id, ''),
+			claimed.phone_number,
+			COALESCE(claimed.template_name, ''),
+			COALESCE(claimed.received_content, ''),
+			COALESCE(NULLIF(c.webhook_url, ''), NULLIF(s.webhook_url, ''), ''),
+			claimed.created_at,
+			claimed.sweep_claimed_at
+		FROM claimed
+		LEFT JOIN whatsapp_connections c ON c.id = claimed.connection_id
+		LEFT JOIN systems s ON s.id = claimed.system_id
+		ORDER BY claimed.created_at ASC
+	`
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin claim pending inbound: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, query, olderThan, orphanBefore, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim stale pending inbound logs: %w", err)
+	}
+	defer rows.Close()
+
+	pending := make([]PendingInboundLog, 0)
+	for rows.Next() {
+		var row PendingInboundLog
+		if err := rows.Scan(
+			&row.ID, &row.SystemID, &row.ConnectionID, &row.SistemaOrigem, &row.ExternalClientID,
+			&row.MetaMessageID, &row.PhoneNumber, &row.EventType, &row.ReceivedContent,
+			&row.TargetWebhookURL, &row.CreatedAt, &row.SweepClaimedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan claimed pending inbound log: %w", err)
+		}
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate claimed pending inbound logs: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit claim pending inbound: %w", err)
+	}
+	return pending, nil
+}
+
 func (r *PostgresRepository) MarkMessageLogDelivered(
 	ctx context.Context,
 	metaMessageID string,
@@ -681,6 +795,35 @@ func (r *PostgresRepository) UpdateMessageLogStatus(
 	result, err := r.db.ExecContext(ctx, query, id, status)
 	if err != nil {
 		return fmt.Errorf("update message log status: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrMessageLogNotFound
+	}
+	return nil
+}
+
+// UpdateMessageLogStatusFromRelaying fecha uma linha claimada pelo sweep.
+// A guarda no status evita que um claim órfão reclaimed sobrescreva o desfecho
+// de um repasse que outro worker acabou de concluir.
+func (r *PostgresRepository) UpdateMessageLogStatusFromRelaying(
+	ctx context.Context,
+	id string,
+	status model.MessageStatus,
+) error {
+	const query = `
+		UPDATE message_logs
+		SET status = $2,
+		    sweep_claimed_at = NULL
+		WHERE id = $1
+		  AND status = 'relaying'
+	`
+	result, err := r.db.ExecContext(ctx, query, id, status)
+	if err != nil {
+		return fmt.Errorf("update relaying message log status: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {

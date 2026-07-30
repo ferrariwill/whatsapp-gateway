@@ -212,6 +212,7 @@ Content-Type: application/json
 {
   "system_id": "uuid-da-aplicacao-no-gateway",
   "external_client_id": "45",
+  "meta_message_id": "wamid.HBgLMT...",
   "phone_number": "5511999887766",
   "text": "APPT_CONFIRM",
   "event_type": "button_reply",
@@ -222,7 +223,8 @@ Content-Type: application/json
 | Campo | Descrição |
 |---|---|
 | `system_id` | UUID da aplicação no Gateway |
-| `external_client_id` | Cliente externo dono do chip |
+| `external_client_id` | Cliente externo dono do chip (path legado); no webhook unificado o campo equivalente é `tenant_id` |
+| `meta_message_id` | Identidade imutável do evento na Meta — use como chave de idempotência |
 | `phone_number` | WhatsApp de quem respondeu |
 | `text` | Texto ou payload do botão |
 | `event_type` | `text_message` ou `button_reply` |
@@ -235,7 +237,7 @@ Content-Type: application/json
 | `CONFIRM` | `APPT_CONFIRM` | Confirmar agendamento |
 | `CANCEL` | `APPT_RESCHEDULE` | Cancelar / reagendar |
 
-> **Correlação com agendamento:** o webhook **não** inclui `appointment_id`. Sua aplicação deve correlacionar por `external_client_id` + `phone_number` (e janela de tempo ou estado pendente).
+> **Correlação com agendamento:** o webhook **não** inclui `appointment_id`. Preferir `meta_message_id` para deduplicar; na ausência dele, correlacionar por `external_client_id`/`tenant_id` + `phone_number` (e janela de tempo ou estado pendente).
 
 ### Resposta esperada
 
@@ -244,6 +246,38 @@ Responda `200 OK` rapidamente:
 ```json
 {"ok": true}
 ```
+
+### Reentrega de repasses interrompidos (`replay`)
+
+Se o Gateway for reiniciado no meio de um repasse, a linha de auditoria fica em
+`pending`. Um sweep periódico **claima** a linha (`pending` → `relaying`) antes
+do POST — duas instâncias não podem repassar a mesma linha. Claims órfãos
+(processo morto no meio do POST) voltam a ser elegíveis após o TTL do lease.
+
+O corpo do replay traz `"replay": true`, a chave idempotente `meta_message_id`
+(a mesma do repasse em tempo real) e as duas chaves de identidade do tenant
+(`tenant_id` e `external_client_id`), porque a linha não guarda por qual
+endpoint o evento entrou. A resolução de destino é a mesma do tempo real:
+webhook da conexão → webhook do system → `MOTHER_SYSTEM_WEBHOOK_URL`.
+
+```json
+{
+  "system_id": "uuid-da-aplicacao-no-gateway",
+  "sistema_origem": "beleza_web",
+  "tenant_id": "45",
+  "external_client_id": "45",
+  "meta_message_id": "wamid.HBgLMT...",
+  "phone_number": "5511999887766",
+  "text": "APPT_CONFIRM",
+  "event_type": "button_reply",
+  "action": "CONFIRM",
+  "replay": true
+}
+```
+
+Trate o consumo como idempotente pela chave `meta_message_id`: um evento pode
+chegar em tempo real e depois como `replay` se a confirmação do primeiro
+repasse não chegou a ser gravada (ou se um claim órfão foi reclaimado).
 
 ---
 

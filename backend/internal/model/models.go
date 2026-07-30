@@ -56,6 +56,7 @@ type MessageStatus string
 
 const (
 	MessageStatusPending   MessageStatus = "pending"
+	MessageStatusRelaying  MessageStatus = "relaying" // claim do sweep, antes do POST ao SaaS
 	MessageStatusSent      MessageStatus = "sent"
 	MessageStatusDelivered MessageStatus = "delivered"
 	MessageStatusFailed    MessageStatus = "failed"
