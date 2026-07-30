@@ -1,9 +1,6 @@
 package main
 
-
-
 import (
-
 	"context"
 
 	"database/sql"
@@ -30,11 +27,7 @@ import (
 
 	"time"
 
-
-
 	_ "github.com/jackc/pgx/v5/stdlib"
-
-
 
 	"github.com/whatsappgetway/gateway/internal/envutil"
 
@@ -47,24 +40,15 @@ import (
 	"github.com/whatsappgetway/gateway/internal/security"
 
 	"github.com/whatsappgetway/gateway/internal/service"
-
 )
-
-
 
 type contextKey int
 
-
-
 const (
-
 	systemContextKey contextKey = iota
 
 	userContextKey
-
 )
-
-
 
 const apiKeyHeader = "X-API-Key"
 
@@ -72,21 +56,18 @@ const apiKeyHeader = "X-API-Key"
 // drenar os repasses inbound em voo.
 const defaultShutdownTimeout = 20 * time.Second
 
-
-
 type server struct {
+	repo *repository.PostgresRepository
 
-	repo       *repository.PostgresRepository
+	templates *template.Template
 
-	templates  *template.Template
-
-	jwtSecret  []byte
+	jwtSecret []byte
 
 	metaClient *http.Client
 
 	metaAPIVer string
 
-	usage      *service.UsageService
+	usage *service.UsageService
 
 	rateLimiter *security.RateLimiter
 
@@ -98,7 +79,6 @@ type server struct {
 	// rejectionLog amostra as linhas de log dos caminhos de rejeição dos
 	// webhooks públicos, que qualquer origem pode disparar em volume.
 	rejectionLog *logSampler
-
 }
 
 // logRejectedWebhook registra uma rejeição de webhook com amostragem.
@@ -116,77 +96,51 @@ func (s *server) logRejectedWebhook(format string, args ...any) {
 
 }
 
-
-
 type sendTemplateRequest struct {
+	ExternalClientID string `json:"external_client_id"`
 
-	ExternalClientID string   `json:"external_client_id"`
+	PhoneNumber string `json:"phone_number"`
 
-	PhoneNumber      string   `json:"phone_number"`
+	AppointmentID string `json:"appointment_id"`
 
-	AppointmentID    string   `json:"appointment_id"`
+	TemplateName string `json:"template_name"`
 
-	TemplateName     string   `json:"template_name"`
-
-	Variables        []string `json:"variables"`
-
+	Variables []string `json:"variables"`
 }
-
-
 
 type sendTemplateResponse struct {
+	MessageLogID string `json:"message_log_id"`
 
-	MessageLogID string              `json:"message_log_id"`
-
-	Status       model.MessageStatus `json:"status"`
-
+	Status model.MessageStatus `json:"status"`
 }
 
-
-
 type createTemplateRequest struct {
+	Name string `json:"name"`
 
-	Name     string   `json:"name"`
+	Category string `json:"category"`
 
-	Category string   `json:"category"`
+	TextBody string `json:"text_body"`
 
-	TextBody string   `json:"text_body"`
-
-	Buttons  []string `json:"buttons"`
+	Buttons []string `json:"buttons"`
 
 	SistemaOrigem string `json:"sistema_origem"`
 
 	TenantID string `json:"tenant_id"`
-
 }
-
-
 
 type createTemplateResponse struct {
-
 	TemplateID string `json:"template_id"`
 
-	Status     string `json:"status"`
-
+	Status string `json:"status"`
 }
-
-
 
 type listTemplatesResponse struct {
-
 	Templates []provider.MetaTemplateResponse `json:"templates"`
-
 }
-
-
 
 type errorResponse struct {
-
 	Error string `json:"error"`
-
 }
-
-
 
 func main() {
 
@@ -198,15 +152,11 @@ func main() {
 
 	}
 
-
-
 	if err := runMigrations(databaseURL); err != nil {
 
 		log.Fatalf("run migrations: %v", err)
 
 	}
-
-
 
 	jwtSecret, err := loadJWTSecret(os.Getenv("JWT_SECRET"))
 
@@ -215,8 +165,6 @@ func main() {
 		log.Fatalf("invalid JWT_SECRET: %v", err)
 
 	}
-
-
 
 	db, err := sql.Open("pgx", databaseURL)
 
@@ -228,15 +176,11 @@ func main() {
 
 	defer db.Close()
 
-
-
 	db.SetMaxOpenConns(25)
 
 	db.SetMaxIdleConns(5)
 
 	db.SetConnMaxLifetime(5 * time.Minute)
-
-
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
@@ -248,15 +192,11 @@ func main() {
 
 	}
 
-
-
 	repo := repository.NewPostgresRepository(db)
-
-
 
 	srv := &server{
 
-		repo:      repo,
+		repo: repo,
 
 		templates: loadTemplates(),
 
@@ -265,28 +205,22 @@ func main() {
 		metaClient: &http.Client{
 
 			Timeout: 30 * time.Second,
-
 		},
 
 		metaAPIVer: os.Getenv("META_API_VERSION"),
 
-		usage:       service.NewUsageService(repo),
+		usage: service.NewUsageService(repo),
 
 		rateLimiter: security.NewRateLimiterFromEnv(),
 
-		relay:        newRelayPool(relayPoolConfigFromEnv()),
+		relay: newRelayPool(relayPoolConfigFromEnv()),
 
 		rejectionLog: newLogSampler(envDuration("WEBHOOK_REJECTION_LOG_INTERVAL", defaultRejectionLogInterval)),
-
 	}
-
-
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", handleHealth)
-
-
 
 	mux.HandleFunc("GET /login", srv.handleLoginPage)
 
@@ -316,18 +250,20 @@ func main() {
 	mux.Handle("POST /admin/connections/{id}/unblock", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUnblockConnection)))
 
 	mux.Handle("GET /admin/usage/volume", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUsageVolume)))
+	mux.Handle("GET /admin/audit/logs", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminAuditLogs)))
+	mux.Handle("GET /admin/metrics/relay", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminRelayMetrics)))
 
 	mux.HandleFunc("GET /webhook/whatsapp", srv.handleWhatsAppWebhookVerify)
 	mux.HandleFunc("POST /webhook/whatsapp", srv.handleWhatsAppWebhookEvent)
 
 	mux.HandleFunc("GET /meta/embedded-signup/callback", srv.handleEmbeddedSignupCallback)
 
+	mux.Handle("POST /v1/embedded-signup/state", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleMintEmbeddedSignupState)))
+
 	mux.HandleFunc("GET /webhooks/meta/{phone_number_id}", srv.handleMetaWebhookVerify)
 	mux.HandleFunc("POST /webhooks/meta/{phone_number_id}", srv.handleMetaWebhookEvent)
 
 	mux.Handle("POST /send-notification", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendNotification)))
-
-
 
 	mux.Handle("POST /v1/channels", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleCreateChannel)))
 
@@ -339,8 +275,6 @@ func main() {
 
 	mux.Handle("GET /v1/usage/report", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleUsageReport)))
 
-
-
 	addr := envOrDefault("PORT", "8080")
 
 	if !strings.HasPrefix(addr, ":") {
@@ -349,16 +283,13 @@ func main() {
 
 	}
 
-
-
 	corsCfg := loadCORSConfig()
 
 	httpServer := &http.Server{
 
-		Addr:    addr,
+		Addr: addr,
 
 		Handler: CORSMiddleware(corsCfg, mux),
-
 	}
 
 	// O sweep de reconciliação do inbound roda enquanto o processo vive: fecha
@@ -436,8 +367,6 @@ func main() {
 
 }
 
-
-
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
@@ -445,8 +374,6 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 
 }
-
-
 
 func (s *server) jwtMiddleware(next http.Handler) http.Handler {
 
@@ -472,8 +399,6 @@ func (s *server) jwtMiddleware(next http.Handler) http.Handler {
 
 		}
 
-
-
 		userID, err := security.ValidateToken(token, s.jwtSecret)
 
 		if err != nil {
@@ -494,8 +419,6 @@ func (s *server) jwtMiddleware(next http.Handler) http.Handler {
 
 		}
 
-
-
 		ctx := context.WithValue(r.Context(), userContextKey, userID)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -504,15 +427,11 @@ func (s *server) jwtMiddleware(next http.Handler) http.Handler {
 
 }
 
-
-
 func (s *server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 
 	renderLoginPage(w, s.templates, loginErrorMessage(r.URL.Query().Get("error")))
 
 }
-
-
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
@@ -525,8 +444,6 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 
 	}
-
-
 
 	user, err := s.repo.FindUserByEmail(r.Context(), email)
 
@@ -548,8 +465,6 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	if err := security.VerifyPassword(password, user.PasswordHash); err != nil {
 
 		s.respondLoginFailure(w, r, "invalid")
@@ -557,8 +472,6 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 
 	}
-
-
 
 	token, err := security.GenerateToken(user.ID, s.jwtSecret)
 
@@ -572,8 +485,6 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	security.SetAuthCookie(w, token)
 
 	if isHTMX(r) {
@@ -582,13 +493,9 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
-
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 
 }
-
-
 
 func (s *server) respondLoginFailure(w http.ResponseWriter, r *http.Request, code string) {
 
@@ -604,8 +511,6 @@ func (s *server) respondLoginFailure(w http.ResponseWriter, r *http.Request, cod
 
 }
 
-
-
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 	security.ClearAuthCookie(w)
@@ -613,8 +518,6 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 
 }
-
-
 
 func (s *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
@@ -629,8 +532,6 @@ func (s *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.renderDashboard(w, r)
 
 }
-
-
 
 func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 
@@ -660,8 +561,6 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
-
 	logs, err := s.repo.ListRecentMessageLogs(r.Context(), 50)
 
 	if err != nil {
@@ -683,8 +582,6 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 	renderDashboardPage(w, s.templates, buildDashboardData(systems, connections, channels, logs, spamKeys))
 
 }
-
-
 
 func (s *server) handleAdminCreateChannel(w http.ResponseWriter, r *http.Request) {
 
@@ -740,16 +637,15 @@ func (s *server) handleAdminCreateChannel(w http.ResponseWriter, r *http.Request
 
 	channel := &model.ClientChannel{
 
-		SystemID:            system.ID,
+		SystemID: system.ID,
 
-		SalonName:           salonName,
+		SalonName: salonName,
 
-		ExternalClientID:    externalClientID,
+		ExternalClientID: externalClientID,
 
-		PhoneNumberID:       phoneNumberID,
+		PhoneNumberID: phoneNumberID,
 
 		WhatsAppPhoneNumber: whatsappPhoneNumber,
-
 	}
 
 	if err := s.repo.CreateClientChannel(r.Context(), channel); err != nil {
@@ -776,8 +672,6 @@ func (s *server) handleAdminCreateChannel(w http.ResponseWriter, r *http.Request
 
 }
 
-
-
 func writeHTML(w http.ResponseWriter, status int, html string) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -788,18 +682,14 @@ func writeHTML(w http.ResponseWriter, status int, html string) {
 
 }
 
-
-
 func parseLoginCredentials(r *http.Request) (email, password string, ok bool) {
 
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 
 		var payload struct {
-
-			Email    string `json:"email"`
+			Email string `json:"email"`
 
 			Password string `json:"password"`
-
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -826,8 +716,6 @@ func parseLoginCredentials(r *http.Request) (email, password string, ok bool) {
 
 	}
 
-
-
 	if email == "" || password == "" {
 
 		return "", "", false
@@ -838,8 +726,6 @@ func parseLoginCredentials(r *http.Request) (email, password string, ok bool) {
 
 }
 
-
-
 func userIDFromContext(ctx context.Context) (string, bool) {
 
 	userID, ok := ctx.Value(userContextKey).(string)
@@ -847,8 +733,6 @@ func userIDFromContext(ctx context.Context) (string, bool) {
 	return userID, ok && userID != ""
 
 }
-
-
 
 func (s *server) apiKeyMiddleware(next http.Handler) http.Handler {
 
@@ -863,8 +747,6 @@ func (s *server) apiKeyMiddleware(next http.Handler) http.Handler {
 			return
 
 		}
-
-
 
 		hash := security.HashAPIKey(apiKey)
 
@@ -888,8 +770,6 @@ func (s *server) apiKeyMiddleware(next http.Handler) http.Handler {
 
 		}
 
-
-
 		ctx := context.WithValue(r.Context(), systemContextKey, *system)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -897,8 +777,6 @@ func (s *server) apiKeyMiddleware(next http.Handler) http.Handler {
 	})
 
 }
-
-
 
 func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
@@ -912,8 +790,6 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	var req sendTemplateRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -924,8 +800,6 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	req.ExternalClientID = strings.TrimSpace(req.ExternalClientID)
 
 	req.PhoneNumber = strings.TrimSpace(req.PhoneNumber)
@@ -934,8 +808,6 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
 	req.TemplateName = strings.TrimSpace(req.TemplateName)
 
-
-
 	if req.ExternalClientID == "" || req.PhoneNumber == "" || req.AppointmentID == "" || req.TemplateName == "" {
 
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "external_client_id, phone_number, appointment_id and template_name are required"})
@@ -943,8 +815,6 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 
 	}
-
-
 
 	channel, err := s.repo.FindClientChannelBySystemAndExternalClientID(r.Context(), system.ID, req.ExternalClientID)
 
@@ -979,11 +849,14 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.enforceConnectionSpamProtection(w, r, conn) {
+	if !s.enforceConnectionSpamProtection(w, r, conn, outboundAttemptAudit{
+		AppointmentID: req.AppointmentID,
+		PhoneNumber:   req.PhoneNumber,
+		TemplateName:  req.TemplateName,
+		Variables:     req.Variables,
+	}) {
 		return
 	}
-
-
 
 	withinLimit, err := s.usage.CheckMonthlyLimit(r.Context(), system.ID, req.ExternalClientID)
 	if err != nil {
@@ -999,8 +872,6 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
-
 	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 
 	metaMessageID, sendErr := metaProvider.SendAppointmentTemplate(
@@ -1012,8 +883,6 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 		req.Variables,
 	)
 
-
-
 	status := model.MessageStatusSent
 
 	if sendErr != nil {
@@ -1024,37 +893,32 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	messageLog := &model.MessageLog{
 
-		SystemID:         system.ID,
+		SystemID: system.ID,
 
-		ConnectionID:     conn.ID,
+		ConnectionID: conn.ID,
 
-		SistemaOrigem:    conn.SistemaOrigem,
+		SistemaOrigem: conn.SistemaOrigem,
 
 		ExternalClientID: req.ExternalClientID,
 
-		MetaMessageID:    metaMessageID,
+		MetaMessageID: metaMessageID,
 
-		AppointmentID:    req.AppointmentID,
+		AppointmentID: req.AppointmentID,
 
-		PhoneNumber:      req.PhoneNumber,
+		PhoneNumber: req.PhoneNumber,
 
-		TemplateName:     req.TemplateName,
+		TemplateName: req.TemplateName,
 
-		SentContent:      formatOutboundSentContent(req.TemplateName, req.Variables),
+		SentContent: formatOutboundSentContent(req.TemplateName, req.Variables),
 
-		Direction:        model.MessageDirectionOutbound,
+		Direction: model.MessageDirectionOutbound,
 
-		MessageCategory:  model.MessageCategoryUtility,
+		MessageCategory: model.MessageCategoryUtility,
 
-		Status:           status,
-
+		Status: status,
 	}
-
-
 
 	if err := s.repo.CreateMessageLog(r.Context(), messageLog); err != nil {
 
@@ -1066,8 +930,6 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	if sendErr != nil {
 
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: sendErr.Error()})
@@ -1076,19 +938,14 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	writeJSON(w, http.StatusOK, sendTemplateResponse{
 
 		MessageLogID: messageLog.ID,
 
-		Status:       messageLog.Status,
-
+		Status: messageLog.Status,
 	})
 
 }
-
-
 
 func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 
@@ -1102,8 +959,6 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	var req createTemplateRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1114,8 +969,6 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	req.Name = strings.TrimSpace(req.Name)
 
 	req.Category = strings.TrimSpace(req.Category)
@@ -1125,8 +978,6 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	req.SistemaOrigem = strings.TrimSpace(strings.ToLower(req.SistemaOrigem))
 
 	req.TenantID = strings.TrimSpace(req.TenantID)
-
-
 
 	if req.Name == "" || req.TextBody == "" {
 
@@ -1163,8 +1014,6 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
-
 	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 
 	templateID, err := metaProvider.CreateTemplate(
@@ -1187,19 +1036,14 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	writeJSON(w, http.StatusCreated, createTemplateResponse{
 
 		TemplateID: templateID,
 
-		Status:     "PENDING",
-
+		Status: "PENDING",
 	})
 
 }
-
-
 
 func (s *server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 
@@ -1236,8 +1080,6 @@ func (s *server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
-
 	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 
 	templates, err := metaProvider.GetTemplatesStatus(r.Context(), conn.AccessToken, conn.WabaID)
@@ -1252,21 +1094,15 @@ func (s *server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-
-
 	if templates == nil {
 
 		templates = []provider.MetaTemplateResponse{}
 
 	}
 
-
-
 	writeJSON(w, http.StatusOK, listTemplatesResponse{Templates: templates})
 
 }
-
-
 
 func systemFromContext(ctx context.Context) (model.System, bool) {
 
@@ -1275,8 +1111,6 @@ func systemFromContext(ctx context.Context) (model.System, bool) {
 	return system, ok
 
 }
-
-
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 
@@ -1287,8 +1121,6 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 
 }
-
-
 
 func envOrDefault(key, fallback string) string {
 
@@ -1301,8 +1133,6 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 
 }
-
-
 
 func loadJWTSecret(raw string) ([]byte, error) {
 
@@ -1321,5 +1151,3 @@ func loadJWTSecret(raw string) ([]byte, error) {
 	return []byte(raw), nil
 
 }
-
-

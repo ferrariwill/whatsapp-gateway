@@ -60,6 +60,7 @@ const (
 	MessageStatusSent      MessageStatus = "sent"
 	MessageStatusDelivered MessageStatus = "delivered"
 	MessageStatusFailed    MessageStatus = "failed"
+	MessageStatusRejected  MessageStatus = "rejected"
 )
 
 // System representa a aplicação mãe de agendamento (tenant raiz do gateway).
@@ -117,4 +118,10 @@ type MessageLog struct {
 	MetaCost         float64          `json:"meta_cost" db:"meta_cost"`
 	DeliveredAt      *time.Time       `json:"delivered_at,omitempty" db:"delivered_at"`
 	CreatedAt        time.Time        `json:"created_at" db:"created_at"`
+	// Campos de DLQ / replay inbound (migration 000016).
+	RelayAttempts  int        `json:"relay_attempts,omitempty" db:"relay_attempts"`
+	NextAttemptAt  *time.Time `json:"next_attempt_at,omitempty" db:"next_attempt_at"`
+	FailureReason  string     `json:"failure_reason,omitempty" db:"failure_reason"`
+	LastError      string     `json:"last_error,omitempty" db:"last_error"`
+	InboundPayload []byte     `json:"-" db:"inbound_payload"`
 }

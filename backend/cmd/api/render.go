@@ -1,9 +1,6 @@
 package main
 
-
-
 import (
-
 	"fmt"
 
 	"html/template"
@@ -18,8 +15,6 @@ import (
 
 	"time"
 
-
-
 	"github.com/whatsappgetway/gateway/internal/model"
 
 	"github.com/whatsappgetway/gateway/internal/repository"
@@ -27,48 +22,35 @@ import (
 	"github.com/whatsappgetway/gateway/internal/security"
 
 	"github.com/whatsappgetway/gateway/internal/service"
-
 )
 
-
-
 type pageData struct {
-
 	Title string
 
 	Error string
-
 }
-
-
 
 type loginPageData struct {
-
 	pageData
-
 }
 
-
-
 type dashboardPageData struct {
-
 	pageData
 
-	Systems        []systemRowData
-	SystemOptions  []systemOptionData
+	Systems       []systemRowData
+	SystemOptions []systemOptionData
 
-	HasSystems  bool
+	HasSystems bool
 
 	Connections []connectionRowData
 
-	Channels    []channelRowData
+	Channels []channelRowData
 
-	AuditLogs   []auditLogRowData
+	AuditLogs []auditLogRowData
 
 	UsageMonth int
 
-	UsageYear  int
-
+	UsageYear int
 }
 
 type systemRowData struct {
@@ -104,30 +86,26 @@ type connectionRowData struct {
 }
 
 type channelRowData struct {
+	SystemID string
 
-	SystemID            string
+	SystemName string
 
-	SystemName          string
+	ChannelID string
 
-	ChannelID           string
+	ChannelLabel string
 
-	ChannelLabel        string
-
-	ExternalClientID    string
+	ExternalClientID string
 
 	WhatsAppPhoneNumber string
 
-	PhoneNumberID       string
+	PhoneNumberID string
 
-	Status              string
+	Status string
 
-	IsSuspendedSpam     bool
+	IsSuspendedSpam bool
 
-	CreatedAt           string
-
+	CreatedAt string
 }
-
-
 
 type auditLogRowData struct {
 	CreatedAt        string
@@ -139,6 +117,9 @@ type auditLogRowData struct {
 	TemplateLabel    string
 	Content          string
 	SpamAlert        bool
+	Status           string
+	FailureReason    string
+	IsRejected       bool
 }
 
 type externalClientUsageView struct {
@@ -163,8 +144,6 @@ type usageVolumeView struct {
 	TotalSent    int64
 }
 
-
-
 func loadTemplates() *template.Template {
 
 	dir := resolveTemplatesDir()
@@ -179,8 +158,6 @@ func loadTemplates() *template.Template {
 
 }
 
-
-
 func resolveTemplatesDir() string {
 
 	if dir := os.Getenv("TEMPLATES_DIR"); dir != "" {
@@ -188,8 +165,6 @@ func resolveTemplatesDir() string {
 		return dir
 
 	}
-
-
 
 	candidates := []string{
 
@@ -200,10 +175,7 @@ func resolveTemplatesDir() string {
 		filepath.Join("frontend", "templates"),
 
 		"templates",
-
 	}
-
-
 
 	for _, candidate := range candidates {
 
@@ -215,13 +187,9 @@ func resolveTemplatesDir() string {
 
 	}
 
-
-
 	return filepath.Join("..", "..", "frontend", "templates")
 
 }
-
-
 
 func buildDashboardData(
 	systems []model.System,
@@ -261,31 +229,28 @@ func buildDashboardData(
 
 		channelRows = append(channelRows, channelRowData{
 
-			SystemID:            ch.SystemID,
+			SystemID: ch.SystemID,
 
-			SystemName:          ch.SystemName,
+			SystemName: ch.SystemName,
 
-			ChannelID:           ch.ID,
+			ChannelID: ch.ID,
 
-			ChannelLabel:        ch.SalonName,
+			ChannelLabel: ch.SalonName,
 
-			ExternalClientID:    ch.ExternalClientID,
+			ExternalClientID: ch.ExternalClientID,
 
 			WhatsAppPhoneNumber: ch.WhatsAppPhoneNumber,
 
-			PhoneNumberID:       ch.PhoneNumberID,
+			PhoneNumberID: ch.PhoneNumberID,
 
-			Status:              ch.Status,
+			Status: ch.Status,
 
-			IsSuspendedSpam:     ch.Status == string(security.ClientChannelStatusSuspendedSpam),
+			IsSuspendedSpam: ch.Status == string(security.ClientChannelStatusSuspendedSpam),
 
-			CreatedAt:           formatDateTime(ch.CreatedAt),
-
+			CreatedAt: formatDateTime(ch.CreatedAt),
 		})
 
 	}
-
-
 
 	auditRows := make([]auditLogRowData, 0, len(logs))
 	for _, entry := range logs {
@@ -301,23 +266,24 @@ func buildDashboardData(
 			TemplateLabel:    auditTemplateLabel(entry.MessageLog),
 			Content:          auditDisplayContent(entry.MessageLog),
 			SpamAlert:        spamAlert,
+			Status:           string(entry.Status),
+			FailureReason:    entry.FailureReason,
+			IsRejected:       entry.Status == model.MessageStatusRejected,
 		})
 	}
 
 	return dashboardPageData{
-		pageData: pageData{Title: "Dashboard — Volume de Disparos por Aplicação e Clientes"},
+		pageData:      pageData{Title: "Dashboard — Volume de Disparos por Aplicação e Clientes"},
 		Systems:       systemRows,
 		SystemOptions: systemOptions,
 		HasSystems:    len(systemRows) > 0,
-		Connections:  connectionRows,
-		Channels:     channelRows,
-		AuditLogs:    auditRows,
-		UsageMonth:   int(now.Month()),
-		UsageYear:    now.Year(),
+		Connections:   connectionRows,
+		Channels:      channelRows,
+		AuditLogs:     auditRows,
+		UsageMonth:    int(now.Month()),
+		UsageYear:     now.Year(),
 	}
 }
-
-
 
 func newSystemRow(system model.System) systemRowData {
 	hint := system.APIKeyHash
@@ -417,31 +383,28 @@ func newChannelRow(systemID, systemName, channelID, channelLabel, externalClient
 
 	return channelRowData{
 
-		SystemID:            systemID,
+		SystemID: systemID,
 
-		SystemName:          systemName,
+		SystemName: systemName,
 
-		ChannelID:           channelID,
+		ChannelID: channelID,
 
-		ChannelLabel:        channelLabel,
+		ChannelLabel: channelLabel,
 
-		ExternalClientID:    externalClientID,
+		ExternalClientID: externalClientID,
 
 		WhatsAppPhoneNumber: whatsappPhoneNumber,
 
-		PhoneNumberID:       phoneNumberID,
+		PhoneNumberID: phoneNumberID,
 
-		Status:              status,
+		Status: status,
 
-		IsSuspendedSpam:     status == string(security.ClientChannelStatusSuspendedSpam),
+		IsSuspendedSpam: status == string(security.ClientChannelStatusSuspendedSpam),
 
-		CreatedAt:           formatDateTime(createdAt),
-
+		CreatedAt: formatDateTime(createdAt),
 	}
 
 }
-
-
 
 func formatDateTime(value time.Time) string {
 
@@ -454,8 +417,6 @@ func formatDateTime(value time.Time) string {
 	return value.Local().Format("02/01/2006 15:04")
 
 }
-
-
 
 func loginErrorMessage(code string) string {
 
@@ -477,15 +438,11 @@ func loginErrorMessage(code string) string {
 
 }
 
-
-
 func isHTMX(r *http.Request) bool {
 
 	return r.Header.Get("HX-Request") == "true"
 
 }
-
-
 
 func renderLoginPage(w http.ResponseWriter, tpl *template.Template, errorMsg string) {
 
@@ -498,14 +455,10 @@ func renderLoginPage(w http.ResponseWriter, tpl *template.Template, errorMsg str
 			Title: "Login — WhatsApp Gateway",
 
 			Error: errorMsg,
-
 		},
-
 	})
 
 }
-
-
 
 func renderDashboardPage(w http.ResponseWriter, tpl *template.Template, data dashboardPageData) {
 
@@ -514,8 +467,6 @@ func renderDashboardPage(w http.ResponseWriter, tpl *template.Template, data das
 	_ = tpl.ExecuteTemplate(w, "dashboard.html", data)
 
 }
-
-
 
 func channelFormErrorHTML(message string) string {
 
@@ -542,8 +493,6 @@ func respondChannelFormError(w http.ResponseWriter, r *http.Request, status int,
 
 	writeHTML(w, status, channelFormErrorHTML(message))
 }
-
-
 
 func buildUsageVolumeView(reports []service.ExternalClientUsageReport, month, year int, monthlyLimit int64) usageVolumeView {
 	view := usageVolumeView{
@@ -579,12 +528,8 @@ func renderUsageVolumePartial(w http.ResponseWriter, tpl *template.Template, dat
 	}
 }
 
-
-
 func formatMoney(value float64) string {
 
 	return strconv.FormatFloat(value, 'f', 4, 64)
 
 }
-
-

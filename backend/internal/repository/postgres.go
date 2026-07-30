@@ -360,7 +360,8 @@ func (r *PostgresRepository) ListRecentMessageLogs(ctx context.Context, limit in
 	const query = `
 		SELECT ml.id, ml.system_id, ml.external_client_id, ml.meta_message_id, ml.appointment_id,
 		       ml.phone_number, ml.template_name, ml.sent_content, ml.received_content, ml.direction,
-		       ml.message_category, ml.status, ml.meta_cost, ml.delivered_at, ml.created_at, s.name
+		       ml.message_category, ml.status, ml.meta_cost, ml.delivered_at, ml.created_at,
+		       ml.failure_reason, s.name
 		FROM message_logs ml INNER JOIN systems s ON s.id = ml.system_id
 		ORDER BY ml.created_at DESC LIMIT $1
 	`
@@ -385,13 +386,14 @@ func scanMessageLogWithSystem(scanner interface {
 	Scan(dest ...any) error
 }) (MessageLogWithSystem, error) {
 	var entry MessageLogWithSystem
-	var externalClientID, metaMessageID, messageCategory sql.NullString
+	var externalClientID, metaMessageID, messageCategory, failureReason sql.NullString
 	var templateName, sentContent, receivedContent, direction sql.NullString
 	var deliveredAt sql.NullTime
 	err := scanner.Scan(
 		&entry.ID, &entry.SystemID, &externalClientID, &metaMessageID, &entry.AppointmentID,
 		&entry.PhoneNumber, &templateName, &sentContent, &receivedContent, &direction,
-		&messageCategory, &entry.Status, &entry.MetaCost, &deliveredAt, &entry.CreatedAt, &entry.SystemName,
+		&messageCategory, &entry.Status, &entry.MetaCost, &deliveredAt, &entry.CreatedAt,
+		&failureReason, &entry.SystemName,
 	)
 	if err != nil {
 		return entry, fmt.Errorf("scan message log: %w", err)
@@ -422,6 +424,9 @@ func scanMessageLogWithSystem(scanner interface {
 	if deliveredAt.Valid {
 		entry.DeliveredAt = &deliveredAt.Time
 	}
+	if failureReason.Valid {
+		entry.FailureReason = failureReason.String
+	}
 	return entry, nil
 }
 
@@ -434,6 +439,7 @@ func (r *PostgresRepository) FindHighVolumeClientKeys(
 		SELECT system_id, external_client_id
 		FROM message_logs
 		WHERE direction = 'OUTBOUND'
+		  AND status IN ('sent', 'delivered', 'failed')
 		  AND external_client_id IS NOT NULL
 		  AND external_client_id <> ''
 		  AND created_at >= NOW() AT TIME ZONE 'UTC' - ($1 * INTERVAL '1 minute')
@@ -465,12 +471,12 @@ func (r *PostgresRepository) CreateMessageLog(ctx context.Context, log *model.Me
 		INSERT INTO message_logs (
 			system_id, connection_id, sistema_origem, external_client_id, meta_message_id,
 			appointment_id, phone_number, template_name, sent_content, received_content,
-			direction, message_category, status, meta_cost
+			direction, message_category, status, meta_cost, inbound_payload, failure_reason
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		RETURNING id, created_at
 	`
-	var systemID, connectionID, sistemaOrigem, externalClientID, metaMessageID, messageCategory, templateName, sentContent, receivedContent any
+	var systemID, connectionID, sistemaOrigem, externalClientID, metaMessageID, messageCategory, templateName, sentContent, receivedContent, inboundPayload, failureReason any
 	if log.SystemID != "" {
 		systemID = log.SystemID
 	}
@@ -498,11 +504,18 @@ func (r *PostgresRepository) CreateMessageLog(ctx context.Context, log *model.Me
 	if log.MessageCategory != "" {
 		messageCategory = string(log.MessageCategory)
 	}
+	if len(log.InboundPayload) > 0 {
+		inboundPayload = log.InboundPayload
+	}
+	if log.FailureReason != "" {
+		failureReason = log.FailureReason
+	}
 
 	err := r.db.QueryRowContext(ctx, query,
 		systemID, connectionID, sistemaOrigem, externalClientID, metaMessageID,
 		log.AppointmentID, log.PhoneNumber, templateName, sentContent, receivedContent,
-		string(log.Direction), messageCategory, log.Status, log.MetaCost,
+		string(log.Direction), messageCategory, log.Status, log.MetaCost, inboundPayload,
+		failureReason,
 	).Scan(&log.ID, &log.CreatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -514,10 +527,10 @@ func (r *PostgresRepository) CreateMessageLog(ctx context.Context, log *model.Me
 }
 
 type ClientUsageStats struct {
-	TotalSent          int64
-	TotalDelivered     int64
-	TotalFailed        int64
-	UtilityDelivered   int64
+	TotalSent        int64
+	TotalDelivered   int64
+	TotalFailed      int64
+	UtilityDelivered int64
 }
 
 type ApplicationClientUsageRow struct {
@@ -629,8 +642,7 @@ func (r *PostgresRepository) CountMonthlyMessagesForClient(
 }
 
 // PendingInboundLog é uma linha inbound claimada pelo sweep para reprocessar o
-// repasse. TargetWebhookURL resolve conexão → aplicação mãe; o fallback
-// MOTHER_SYSTEM_WEBHOOK_URL é aplicado em Go, igual ao caminho em tempo real.
+// repasse. TargetWebhookURL resolve conexão → aplicação mãe (sem fallback global).
 type PendingInboundLog struct {
 	ID               string
 	SystemID         string
@@ -642,21 +654,28 @@ type PendingInboundLog struct {
 	EventType        string
 	ReceivedContent  string
 	TargetWebhookURL string
+	InboundPayload   []byte
+	RelayAttempts    int
 	CreatedAt        time.Time
 	SweepClaimedAt   time.Time
 }
 
 // ClaimStalePendingInboundLogs claima atomicamente um lote de linhas inbound
-// elegíveis: pending mais velhas que olderThan, ou relaying cujo lease expirou
-// (claim órfão). O claim grava status=relaying + sweep_claimed_at ANTES de
-// commit — assim duas instâncias não podem selecionar a mesma linha e ambas
-// fazerem POST. FOR UPDATE SKIP LOCKED + UPDATE na mesma transação.
+// elegíveis: pending mais velhas que olderThan, failed retryable com
+// next_attempt_at vencido, ou relaying cujo lease expirou (claim órfão).
+// O claim grava status=relaying + sweep_claimed_at e incrementa relay_attempts
+// ANTES de commit — assim duas instâncias não podem fazer POST concorrente.
 func (r *PostgresRepository) ClaimStalePendingInboundLogs(
 	ctx context.Context,
 	olderThan time.Time,
 	orphanBefore time.Time,
+	now time.Time,
+	maxAttempts int,
 	limit int,
 ) ([]PendingInboundLog, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
 	const query = `
 		WITH candidates AS (
 			SELECT ml.id
@@ -665,15 +684,23 @@ func (r *PostgresRepository) ClaimStalePendingInboundLogs(
 			  AND (
 			        (ml.status = 'pending' AND ml.created_at < $1)
 			     OR (ml.status = 'relaying' AND ml.sweep_claimed_at IS NOT NULL AND ml.sweep_claimed_at < $2)
+			     OR (
+			            ml.status = 'failed'
+			        AND COALESCE(ml.failure_reason, '') NOT IN ('permanent', 'exhausted')
+			        AND ml.relay_attempts < $4
+			        AND (ml.next_attempt_at IS NULL OR ml.next_attempt_at <= $3)
+			     )
 			  )
 			ORDER BY ml.created_at ASC
-			LIMIT $3
+			LIMIT $5
 			FOR UPDATE SKIP LOCKED
 		),
 		claimed AS (
 			UPDATE message_logs ml
 			SET status = 'relaying',
-			    sweep_claimed_at = NOW()
+			    sweep_claimed_at = NOW(),
+			    relay_attempts = ml.relay_attempts + 1,
+			    next_attempt_at = NULL
 			FROM candidates
 			WHERE ml.id = candidates.id
 			RETURNING
@@ -686,6 +713,8 @@ func (r *PostgresRepository) ClaimStalePendingInboundLogs(
 				ml.phone_number,
 				ml.template_name,
 				ml.received_content,
+				ml.inbound_payload,
+				ml.relay_attempts,
 				ml.created_at,
 				ml.sweep_claimed_at
 		)
@@ -700,6 +729,8 @@ func (r *PostgresRepository) ClaimStalePendingInboundLogs(
 			COALESCE(claimed.template_name, ''),
 			COALESCE(claimed.received_content, ''),
 			COALESCE(NULLIF(c.webhook_url, ''), NULLIF(s.webhook_url, ''), ''),
+			claimed.inbound_payload,
+			claimed.relay_attempts,
 			claimed.created_at,
 			claimed.sweep_claimed_at
 		FROM claimed
@@ -714,7 +745,7 @@ func (r *PostgresRepository) ClaimStalePendingInboundLogs(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	rows, err := tx.QueryContext(ctx, query, olderThan, orphanBefore, limit)
+	rows, err := tx.QueryContext(ctx, query, olderThan, orphanBefore, now, maxAttempts, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim stale pending inbound logs: %w", err)
 	}
@@ -723,13 +754,16 @@ func (r *PostgresRepository) ClaimStalePendingInboundLogs(
 	pending := make([]PendingInboundLog, 0)
 	for rows.Next() {
 		var row PendingInboundLog
+		var inboundPayload []byte
 		if err := rows.Scan(
 			&row.ID, &row.SystemID, &row.ConnectionID, &row.SistemaOrigem, &row.ExternalClientID,
 			&row.MetaMessageID, &row.PhoneNumber, &row.EventType, &row.ReceivedContent,
-			&row.TargetWebhookURL, &row.CreatedAt, &row.SweepClaimedAt,
+			&row.TargetWebhookURL, &inboundPayload, &row.RelayAttempts,
+			&row.CreatedAt, &row.SweepClaimedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan claimed pending inbound log: %w", err)
 		}
+		row.InboundPayload = inboundPayload
 		pending = append(pending, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -740,6 +774,45 @@ func (r *PostgresRepository) ClaimStalePendingInboundLogs(
 		return nil, fmt.Errorf("commit claim pending inbound: %w", err)
 	}
 	return pending, nil
+}
+
+type RelayFailureUpdate struct {
+	Status        model.MessageStatus
+	FailureReason string
+	LastError     string
+	RelayAttempts int
+	NextAttemptAt *time.Time
+}
+
+func (r *PostgresRepository) UpdateMessageLogRelayFailure(
+	ctx context.Context,
+	id string,
+	update RelayFailureUpdate,
+) error {
+	const query = `
+		UPDATE message_logs
+		SET status = $2,
+		    failure_reason = NULLIF($3, ''),
+		    last_error = NULLIF($4, ''),
+		    relay_attempts = GREATEST(relay_attempts, $5),
+		    next_attempt_at = $6::timestamptz,
+		    sweep_claimed_at = NULL
+		WHERE id = $1
+	`
+	result, err := r.db.ExecContext(ctx, query,
+		id, update.Status, update.FailureReason, update.LastError, update.RelayAttempts, update.NextAttemptAt,
+	)
+	if err != nil {
+		return fmt.Errorf("update message log relay failure: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrMessageLogNotFound
+	}
+	return nil
 }
 
 func (r *PostgresRepository) MarkMessageLogDelivered(
@@ -806,22 +879,34 @@ func (r *PostgresRepository) UpdateMessageLogStatus(
 	return nil
 }
 
+type CloseRelayingUpdate struct {
+	Status        model.MessageStatus
+	FailureReason string
+	LastError     string
+	NextAttemptAt *time.Time
+}
+
 // UpdateMessageLogStatusFromRelaying fecha uma linha claimada pelo sweep.
 // A guarda no status evita que um claim órfão reclaimed sobrescreva o desfecho
 // de um repasse que outro worker acabou de concluir.
 func (r *PostgresRepository) UpdateMessageLogStatusFromRelaying(
 	ctx context.Context,
 	id string,
-	status model.MessageStatus,
+	update CloseRelayingUpdate,
 ) error {
 	const query = `
 		UPDATE message_logs
 		SET status = $2,
-		    sweep_claimed_at = NULL
+		    sweep_claimed_at = NULL,
+		    failure_reason = CASE WHEN $2::text = 'sent' THEN NULL ELSE NULLIF($3, '') END,
+		    last_error = CASE WHEN $2::text = 'sent' THEN NULL ELSE NULLIF($4, '') END,
+		    next_attempt_at = CASE WHEN $2::text = 'sent' THEN NULL ELSE $5::timestamptz END
 		WHERE id = $1
 		  AND status = 'relaying'
 	`
-	result, err := r.db.ExecContext(ctx, query, id, status)
+	result, err := r.db.ExecContext(ctx, query,
+		id, update.Status, update.FailureReason, update.LastError, update.NextAttemptAt,
+	)
 	if err != nil {
 		return fmt.Errorf("update relaying message log status: %w", err)
 	}

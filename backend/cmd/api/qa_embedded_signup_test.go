@@ -1,15 +1,24 @@
 package main
 
 // Testes regressivos de QA para o callback OAuth do Embedded Signup da Meta
-// (GET /meta/embedded-signup/callback) — o ponto de entrada que cria/atualiza
-// credenciais de tenant no banco.
+// (GET /meta/embedded-signup/callback) e o mint de state single-use
+// (POST /v1/embedded-signup/state).
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/whatsappgetway/gateway/internal/repository"
+	"github.com/whatsappgetway/gateway/internal/security"
 )
 
 type qaConnectionRow struct {
@@ -55,7 +64,6 @@ func qaCountConnections(t *testing.T) int {
 	return count
 }
 
-// qaEmbeddedSignupMetaStub responde ao fluxo OAuth completo do Embedded Signup.
 func qaEmbeddedSignupMetaStub(accessToken, wabaID, phoneNumberID, displayPhone string) *qaMetaStub {
 	stub := newQAMetaStub()
 	stub.respond = func(call qaMetaCall, _ int64) (int, string) {
@@ -94,9 +102,40 @@ func qaSetEmbeddedSignupEnv(t *testing.T) {
 	t.Setenv("META_APP_ID", "qa-app-id")
 	t.Setenv("META_APP_SECRET", "qa-app-secret")
 	t.Setenv("META_EMBEDDED_SIGNUP_REDIRECT_URI", "https://gateway.qa/meta/embedded-signup/callback")
+	t.Setenv("EMBEDDED_SIGNUP_ALLOW_UNSIGNED_STATE", "")
+	t.Setenv("OAUTH_STATE_SECRET", "")
 }
 
-// TestQAEmbeddedSignupStateParsing fixa o contrato do state {slug}_{tenant_id}.
+func qaMintSignedState(t *testing.T, srv *server, apiKey, tenantID string) string {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"tenant_id":%q}`, tenantID)
+	req := httptest.NewRequest(http.MethodPost, "/v1/embedded-signup/state", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(apiKeyHeader, apiKey)
+	rec := httptest.NewRecorder()
+	srv.apiKeyMiddleware(http.HandlerFunc(srv.handleMintEmbeddedSignupState)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("mint state status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var payload mintEmbeddedSignupStateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode mint response: %v", err)
+	}
+	if payload.State == "" {
+		t.Fatal("mint response missing state")
+	}
+	return payload.State
+}
+
+func qaCallbackQuery(code, state string) string {
+	q := url.Values{}
+	q.Set("code", code)
+	q.Set("state", state)
+	return q.Encode()
+}
+
+// TestQAEmbeddedSignupStateParsing fixa o contrato do parser legado (flag on).
 func TestQAEmbeddedSignupStateParsing(t *testing.T) {
 	cases := []struct {
 		state      string
@@ -108,9 +147,7 @@ func TestQAEmbeddedSignupStateParsing(t *testing.T) {
 		{state: "beleza_web_789", wantSlug: "beleza_web", wantTenant: "789"},
 		{state: "BELEZA_WEB_789", wantSlug: "beleza_web", wantTenant: "789"},
 		{state: "clinica_salao-42", wantSlug: "clinica", wantTenant: "salao-42"},
-		// Separador não ambíguo: tenant_id pode conter "_".
 		{state: "beleza_web::salao_1", wantSlug: "beleza_web", wantTenant: "salao_1"},
-		// Ambiguidade legada: o tenant_id fica após o ÚLTIMO underscore.
 		{state: "beleza_web_salao_1", wantSlug: "beleza_web_salao", wantTenant: "1"},
 		{state: "", wantErr: true},
 		{state: "semunderscore", wantErr: true},
@@ -140,6 +177,27 @@ func TestQAEmbeddedSignupStateParsing(t *testing.T) {
 	}
 }
 
+func TestQAEmbeddedSignupRejectsUnsignedStateByDefault(t *testing.T) {
+	requireQADB(t)
+
+	stub := qaEmbeddedSignupMetaStub("token-x", "waba-x", "phone-x", "5511999990000")
+	srv := newQAServer(t, stub, 100)
+	qaSetEmbeddedSignupEnv(t)
+
+	createQASystem(t, "Beleza Web", "beleza_web", "")
+
+	rec := qaGetEmbeddedSignupCallback(t, srv, "code=abc&state=beleza_web_salao-1", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for unsigned state (body=%s)", rec.Code, rec.Body.String())
+	}
+	if stub.CallCount() != 0 {
+		t.Errorf("unsigned state must not reach Meta, got %d calls", stub.CallCount())
+	}
+	if count := qaCountConnections(t); count != 0 {
+		t.Errorf("unsigned state created %d connections", count)
+	}
+}
+
 func TestQAEmbeddedSignupRejectsInvalidCallback(t *testing.T) {
 	requireQADB(t)
 
@@ -158,12 +216,22 @@ func TestQAEmbeddedSignupRejectsInvalidCallback(t *testing.T) {
 		{name: "missing code", query: "state=beleza_web_1", wantStatus: http.StatusBadRequest},
 		{name: "missing state", query: "code=abc", wantStatus: http.StatusBadRequest},
 		{name: "malformed state", query: "code=abc&state=semunderscore", wantStatus: http.StatusBadRequest},
-		{name: "unknown slug", query: "code=abc&state=slug_inexistente_1", wantStatus: http.StatusBadRequest},
+		{name: "unknown slug signed", query: "", wantStatus: http.StatusBadRequest},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := qaGetEmbeddedSignupCallback(t, srv, tc.query, nil)
+			query := tc.query
+			if tc.name == "unknown slug signed" {
+				secret := oauthStateSecret()
+				state, claims, err := security.SignEmbeddedSignupStateClaims(secret, "slug_inexistente", "1", time.Minute)
+				if err != nil {
+					t.Fatalf("sign: %v", err)
+				}
+				_ = claims
+				query = qaCallbackQuery("abc", state)
+			}
+			rec := qaGetEmbeddedSignupCallback(t, srv, query, nil)
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (body=%s)", rec.Code, tc.wantStatus, rec.Body.String())
 			}
@@ -187,8 +255,9 @@ func TestQAEmbeddedSignupPersistsTenantCredentialsAndNotifiesSaaS(t *testing.T) 
 
 	receiver := newQASaaSReceiver(t)
 	beleza := createQASystem(t, "Beleza Web", "beleza_web", receiver.URL())
+	state := qaMintSignedState(t, srv, beleza.APIKey, "salao-1")
 
-	rec := qaGetEmbeddedSignupCallback(t, srv, "code=oauth-code-1&state=beleza_web_salao-1", nil)
+	rec := qaGetEmbeddedSignupCallback(t, srv, qaCallbackQuery("oauth-code-1", state), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -218,10 +287,113 @@ func TestQAEmbeddedSignupPersistsTenantCredentialsAndNotifiesSaaS(t *testing.T) 
 	}
 }
 
-// TestQAEmbeddedSignupUnsignedStateTakesOverExistingTenant demonstra que o
-// state do OAuth não é assinado nem validado contra nonce: quem controla o
-// state escolhe em qual system/tenant o UPSERT vai gravar, sobrescrevendo as
-// credenciais Meta de um tenant já conectado.
+func TestQAEmbeddedSignupSignedStateReplayRejected(t *testing.T) {
+	requireQADB(t)
+
+	stub := qaEmbeddedSignupMetaStub("token-1", "waba-1", "phone-1", "5511988880000")
+	srv := newQAServer(t, stub, 100)
+	qaSetEmbeddedSignupEnv(t)
+
+	receiver := newQASaaSReceiver(t)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", receiver.URL())
+	state := qaMintSignedState(t, srv, beleza.APIKey, "salao-1")
+
+	rec1 := qaGetEmbeddedSignupCallback(t, srv, qaCallbackQuery("code-1", state), nil)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first callback status = %d (body=%s)", rec1.Code, rec1.Body.String())
+	}
+
+	metaCallsAfterFirst := stub.CallCount()
+	rec2 := qaGetEmbeddedSignupCallback(t, srv, qaCallbackQuery("code-2", state), nil)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("replay status = %d, want 400 (body=%s)", rec2.Code, rec2.Body.String())
+	}
+	if stub.CallCount() != metaCallsAfterFirst {
+		t.Errorf("replay must not call Meta again: calls %d -> %d", metaCallsAfterFirst, stub.CallCount())
+	}
+	if count := qaCountConnections(t); count != 1 {
+		t.Errorf("connections = %d, want 1 after replay", count)
+	}
+}
+
+func TestQAEmbeddedSignupConcurrentCallbackConsumesOnce(t *testing.T) {
+	requireQADB(t)
+
+	stub := qaEmbeddedSignupMetaStub("token-race", "waba-race", "phone-race", "5511988880000")
+	srv := newQAServer(t, stub, 100)
+	qaSetEmbeddedSignupEnv(t)
+
+	receiver := newQASaaSReceiver(t)
+	// Slow SaaS notify keeps the first winner in the Meta+upsert window.
+	receiver.delayMs.Store(200)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", receiver.URL())
+	state := qaMintSignedState(t, srv, beleza.APIKey, "salao-race")
+
+	var (
+		wg       sync.WaitGroup
+		statuses [2]int
+	)
+	start := make(chan struct{})
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			rec := qaGetEmbeddedSignupCallback(t, srv, qaCallbackQuery(fmt.Sprintf("code-%d", i), state), nil)
+			statuses[i] = rec.Code
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	ok, bad := 0, 0
+	for _, st := range statuses {
+		switch st {
+		case http.StatusOK:
+			ok++
+		case http.StatusBadRequest:
+			bad++
+		default:
+			t.Fatalf("unexpected status %d among %v", st, statuses)
+		}
+	}
+	if ok != 1 || bad != 1 {
+		t.Fatalf("concurrent callbacks statuses = %v, want exactly one 200 and one 400", statuses)
+	}
+	if count := qaCountConnections(t); count != 1 {
+		t.Errorf("connections = %d, want 1", count)
+	}
+}
+
+func TestQAEmbeddedSignupNonceTenantMismatchRejected(t *testing.T) {
+	requireQADB(t)
+
+	stub := qaEmbeddedSignupMetaStub("token-x", "waba-x", "phone-x", "5511999990000")
+	srv := newQAServer(t, stub, 100)
+	qaSetEmbeddedSignupEnv(t)
+
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	state := qaMintSignedState(t, srv, beleza.APIKey, "salao-1")
+
+	claims, ok, err := security.ParseEmbeddedSignupState(oauthStateSecret(), state)
+	if err != nil || !ok {
+		t.Fatalf("parse minted state: ok=%v err=%v", ok, err)
+	}
+	// Force a tenant mismatch on the persisted row.
+	_, err = qaDB.Exec(`UPDATE oauth_state_nonces SET tenant_id = 'other-tenant' WHERE nonce_hash = $1`, claims.NonceHash)
+	if err != nil {
+		t.Fatalf("mutate nonce tenant: %v", err)
+	}
+
+	rec := qaGetEmbeddedSignupCallback(t, srv, qaCallbackQuery("code-x", state), nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 on tenant mismatch (body=%s)", rec.Code, rec.Body.String())
+	}
+	if stub.CallCount() != 0 {
+		t.Errorf("mismatch must not reach Meta, got %d calls", stub.CallCount())
+	}
+}
+
 func TestQAEmbeddedSignupUnsignedStateTakesOverExistingTenant(t *testing.T) {
 	requireQADB(t)
 
@@ -233,31 +405,55 @@ func TestQAEmbeddedSignupUnsignedStateTakesOverExistingTenant(t *testing.T) {
 	srv := newQAServer(t, stub, 100)
 	qaSetEmbeddedSignupEnv(t)
 
-	// state escolhido livremente por quem inicia o fluxo.
 	rec := qaGetEmbeddedSignupCallback(t, srv, "code=codigo-do-atacante&state=beleza_web_salao-1", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unsigned takeover status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
 
 	conn, ok := qaFindConnection(t, beleza.ID, "salao-1")
 	if !ok {
 		t.Fatal("connection disappeared")
 	}
-
-	if conn.AccessToken == "token-legitimo" && conn.PhoneNumberID == "phone-legitimo" {
-		t.Logf("behaviour changed: callback (HTTP %d) no longer overwrote the tenant credentials — state validation seems to be in place, update the QA report", rec.Code)
-		return
+	if conn.AccessToken != "token-legitimo" || conn.PhoneNumberID != "phone-legitimo" {
+		t.Fatalf("credentials overwritten: %+v (was id=%s)", conn, legit.ID)
 	}
-
-	if conn.ID != legit.ID {
-		t.Errorf("expected the same connection row to be updated, got %s vs %s", conn.ID, legit.ID)
+	if stub.CallCount() != 0 {
+		t.Errorf("unsigned takeover must not call Meta, got %d calls", stub.CallCount())
 	}
-	t.Logf(
-		"finding: callback with an attacker-chosen state (HTTP %d) replaced the credentials of beleza_web/salao-1 — access_token %q -> %q, phone_number_id %q -> %q. Outbound messages of that tenant now leave through the injected number.",
-		rec.Code, "token-legitimo", conn.AccessToken, "phone-legitimo", conn.PhoneNumberID,
-	)
 }
 
-// TestQAEmbeddedSignupTenantIDWithUnderscoreViaDoubleColon garante onboarding
-// de tenant_id contendo "_" via separador "::".
-func TestQAEmbeddedSignupTenantIDWithUnderscoreViaDoubleColon(t *testing.T) {
+func TestQAEmbeddedSignupUnsignedFlagForbidsCreateAndMutation(t *testing.T) {
+	requireQADB(t)
+
+	stub := qaEmbeddedSignupMetaStub("token-x", "waba-x", "phone-x", "5511999990000")
+	srv := newQAServer(t, stub, 100)
+	qaSetEmbeddedSignupEnv(t)
+	t.Setenv("EMBEDDED_SIGNUP_ALLOW_UNSIGNED_STATE", "true")
+
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+
+	// Create blocked.
+	rec := qaGetEmbeddedSignupCallback(t, srv, "code=abc&state=beleza_web_salao-new", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unsigned create status = %d, want 403 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if _, ok := qaFindConnection(t, beleza.ID, "salao-new"); ok {
+		t.Fatal("unsigned flag must not create connection")
+	}
+
+	// Mutation blocked on existing tenant.
+	createQAConnection(t, beleza, "salao-1", "phone-legitimo", "token-legitimo", "")
+	rec2 := qaGetEmbeddedSignupCallback(t, srv, "code=abc&state=beleza_web_salao-1", nil)
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("unsigned mutation status = %d, want 403 (body=%s)", rec2.Code, rec2.Body.String())
+	}
+	conn, ok := qaFindConnection(t, beleza.ID, "salao-1")
+	if !ok || conn.AccessToken != "token-legitimo" {
+		t.Fatalf("unsigned flag mutated credentials: ok=%v conn=%+v", ok, conn)
+	}
+}
+
+func TestQAEmbeddedSignupTenantIDWithUnderscoreViaSignedState(t *testing.T) {
 	requireQADB(t)
 
 	stub := qaEmbeddedSignupMetaStub("token-x", "waba-x", "phone-x", "5511999990000")
@@ -266,8 +462,9 @@ func TestQAEmbeddedSignupTenantIDWithUnderscoreViaDoubleColon(t *testing.T) {
 
 	receiver := newQASaaSReceiver(t)
 	beleza := createQASystem(t, "Beleza Web", "beleza_web", receiver.URL())
+	state := qaMintSignedState(t, srv, beleza.APIKey, "salao_1")
 
-	rec := qaGetEmbeddedSignupCallback(t, srv, "code=abc&state=beleza_web::salao_1", nil)
+	rec := qaGetEmbeddedSignupCallback(t, srv, qaCallbackQuery("abc", state), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -278,33 +475,6 @@ func TestQAEmbeddedSignupTenantIDWithUnderscoreViaDoubleColon(t *testing.T) {
 	if conn.PhoneNumberID != "phone-x" {
 		t.Errorf("phone_number_id = %q, want phone-x", conn.PhoneNumberID)
 	}
-}
-
-// TestQAEmbeddedSignupIgnoresAcceptJSON documenta que a negociação de conteúdo
-// lê o header Accept da RESPOSTA (w.Header()), nunca da requisição: o ramo JSON
-// é inalcançável e o SaaS sempre recebe HTML.
-func TestQAEmbeddedSignupIgnoresAcceptJSON(t *testing.T) {
-	requireQADB(t)
-
-	stub := qaEmbeddedSignupMetaStub("token-x", "waba-x", "phone-x", "5511999990000")
-	srv := newQAServer(t, stub, 100)
-	qaSetEmbeddedSignupEnv(t)
-
-	createQASystem(t, "Beleza Web", "beleza_web", "")
-
-	rec := qaGetEmbeddedSignupCallback(t, srv, "code=abc&state=slug_inexistente_1", map[string]string{
-		"Accept": "application/json",
-	})
-
-	contentType := rec.Header().Get("Content-Type")
-	if strings.Contains(contentType, "application/json") {
-		t.Logf("behaviour changed: Accept: application/json is honoured now (content-type %q) — update the QA report", contentType)
-		return
-	}
-	t.Logf(
-		"finding: request with Accept: application/json got Content-Type %q — writeEmbeddedSignupResult reads the response header instead of the request, so the JSON branch is dead code",
-		contentType,
-	)
 }
 
 func TestQAEmbeddedSignupMetaFailureDoesNotPersistConnection(t *testing.T) {
@@ -336,8 +506,9 @@ func TestQAEmbeddedSignupMetaFailureDoesNotPersistConnection(t *testing.T) {
 			qaSetEmbeddedSignupEnv(t)
 
 			beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+			state := qaMintSignedState(t, srv, beleza.APIKey, "salao-1")
 
-			rec := qaGetEmbeddedSignupCallback(t, srv, "code=abc&state=beleza_web_salao-1", nil)
+			rec := qaGetEmbeddedSignupCallback(t, srv, qaCallbackQuery("abc", state), nil)
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (body=%s)", rec.Code, tc.wantStatus, rec.Body.String())
 			}
@@ -371,5 +542,37 @@ func TestQAEmbeddedSignupRequiresMetaConfiguration(t *testing.T) {
 	}
 	if _, ok := qaFindConnection(t, beleza.ID, "salao-1"); ok {
 		t.Error("connection persisted without Meta configuration")
+	}
+}
+
+func TestQAMintEmbeddedSignupStateRequiresAPIKeyAndRegistersNonce(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srv := newQAServer(t, stub, 100)
+	qaSetEmbeddedSignupEnv(t)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/embedded-signup/state", strings.NewReader(`{"tenant_id":"t1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.apiKeyMiddleware(http.HandlerFunc(srv.handleMintEmbeddedSignupState)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing api key status = %d, want 401", rec.Code)
+	}
+
+	state := qaMintSignedState(t, srv, beleza.APIKey, "t1")
+	claims, ok, err := security.ParseEmbeddedSignupState(oauthStateSecret(), state)
+	if err != nil || !ok {
+		t.Fatalf("parse: ok=%v err=%v", ok, err)
+	}
+
+	err = repository.NewPostgresRepository(qaDB).ConsumeOAuthStateNonce(context.Background(), claims.NonceHash, beleza.ID, "t1")
+	if err != nil {
+		t.Fatalf("registered nonce should be consumable: %v", err)
+	}
+	err = repository.NewPostgresRepository(qaDB).ConsumeOAuthStateNonce(context.Background(), claims.NonceHash, beleza.ID, "t1")
+	if !errors.Is(err, repository.ErrOAuthStateNotFound) {
+		t.Fatalf("second consume = %v, want ErrOAuthStateNotFound", err)
 	}
 }
