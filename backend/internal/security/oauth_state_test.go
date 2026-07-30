@@ -46,7 +46,14 @@ func TestParseEmbeddedSignupStateRejectsTamperAndExpiry(t *testing.T) {
 		t.Fatalf("sign: %v", err)
 	}
 
-	tampered := state[:len(state)-2] + "ff"
+	// O nonce é aleatório a cada execução, então o MAC muda: trocar o último
+	// caractere por um literal fixo era no-op quando o MAC já terminava nele.
+	// Derivar o substituto do próprio caractere garante alteração real sempre.
+	replacement := byte('a')
+	if state[len(state)-1] == replacement {
+		replacement = 'b'
+	}
+	tampered := state[:len(state)-1] + string(replacement)
 	if _, _, err := ParseEmbeddedSignupState(secret, tampered); err == nil {
 		t.Fatal("expected signature error for tampered state")
 	}
