@@ -21,6 +21,7 @@ import (
 type outboundWebhookPayload struct {
 	SystemID         string `json:"system_id"`
 	ExternalClientID string `json:"external_client_id"`
+	MetaMessageID    string `json:"meta_message_id,omitempty"`
 	PhoneNumber      string `json:"phone_number"`
 	Text             string `json:"text"`
 	EventType        string `json:"event_type"`
@@ -194,6 +195,7 @@ func (s *server) processLegacyMetaWebhookAsync(
 			return outboundWebhookPayload{
 				SystemID:         channel.SystemID,
 				ExternalClientID: channel.ExternalClientID,
+				MetaMessageID:    event.id,
 				PhoneNumber:      event.from,
 				Text:             event.text,
 				EventType:        event.eventType,

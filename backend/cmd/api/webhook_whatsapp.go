@@ -20,10 +20,12 @@ type saasWebhookPayload struct {
 	SystemID      string `json:"system_id"`
 	SistemaOrigem string `json:"sistema_origem"`
 	TenantID      string `json:"tenant_id"`
+	MetaMessageID string `json:"meta_message_id,omitempty"`
 	PhoneNumber   string `json:"phone_number"`
 	Text          string `json:"text"`
 	EventType     string `json:"event_type"`
 	Action        string `json:"action,omitempty"`
+	Replay        bool   `json:"replay,omitempty"`
 }
 
 type unifiedMetaWebhookPayload struct {
@@ -142,6 +144,7 @@ func (s *server) processWebhookPayloadAsync(
 				SystemID:      conn.SystemID,
 				SistemaOrigem: conn.SistemaOrigem,
 				TenantID:      conn.TenantID,
+				MetaMessageID: event.id,
 				PhoneNumber:   event.from,
 				Text:          event.text,
 				EventType:     event.eventType,

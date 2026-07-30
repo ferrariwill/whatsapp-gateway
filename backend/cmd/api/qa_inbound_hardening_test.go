@@ -58,8 +58,8 @@ func TestQAPendingSweepReprocessesStaleInbound(t *testing.T) {
 		t.Fatalf("sweep pending inbound: %v", err)
 	}
 
-	if result.Scanned != 2 {
-		t.Fatalf("scanned = %d, want 2 (a linha recente não pode entrar no lote)", result.Scanned)
+	if result.Claimed != 2 {
+		t.Fatalf("claimed = %d, want 2 (a linha recente não pode entrar no lote)", result.Claimed)
 	}
 	if result.Relayed != 1 || result.Failed != 1 {
 		t.Errorf("relayed = %d, failed = %d, want 1 and 1", result.Relayed, result.Failed)
@@ -84,6 +84,12 @@ func TestQAPendingSweepReprocessesStaleInbound(t *testing.T) {
 	}
 	if received[0].Text != "quero remarcar" {
 		t.Errorf("repasse text = %q, want o received_content da linha", received[0].Text)
+	}
+	if !received[0].Replay {
+		t.Error("repasse do sweep deve carregar replay=true")
+	}
+	if received[0].MetaMessageID != "wamid.QA.PENDING.1" {
+		t.Errorf("meta_message_id = %q, want wamid.QA.PENDING.1 (chave idempotente)", received[0].MetaMessageID)
 	}
 }
 
@@ -144,14 +150,232 @@ func TestQAPendingSweepDoesNotOverwriteClosedRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep pending inbound: %v", err)
 	}
-	if result.Scanned != 0 {
-		t.Errorf("scanned = %d, want 0 — linha já fechada não é candidata", result.Scanned)
+	if result.Claimed != 0 {
+		t.Errorf("claimed = %d, want 0 — linha já fechada não é candidata", result.Claimed)
 	}
 	if got := qaMessageLogStatus(t, logID); got != string(model.MessageStatusDelivered) {
 		t.Errorf("status = %q, want delivered (o sweep não pode sobrescrever)", got)
 	}
 	if hits := receiver.Hits(); hits != 0 {
 		t.Errorf("SaaS recebeu %d repasses de uma linha já fechada", hits)
+	}
+}
+
+// TestQAPendingSweepConcurrentClaimPostsOnce prova o claim atômico: dois
+// sweepers concorrentes claimam a mesma linha stale e exatamente um POST chega
+// ao SaaS. Sem o claim-antes-do-POST, ambos fariam forwardWebhookWithRetry.
+func TestQAPendingSweepConcurrentClaimPostsOnce(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srvA := newQAServer(t, stub, 100)
+	srvB := newQAServer(t, stub, 100)
+
+	receiver := newQASaaSReceiver(t)
+	// Atraso no SaaS amplia a janela em que o segundo sweeper poderia POSTAR
+	// se o claim não fosse atômico antes do HTTP.
+	receiver.delayMs.Store(400)
+
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	conn := createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", receiver.URL())
+
+	qaInsertPendingInbound(t, beleza.ID, conn.ID, beleza.Slug, "salao-1",
+		"wamid.QA.PENDING.RACE", "5511900000000", "text_message", "oi",
+		time.Now().UTC().Add(-time.Hour))
+
+	var (
+		wg      sync.WaitGroup
+		results [2]pendingSweepResult
+		errs    [2]error
+	)
+	start := make(chan struct{})
+	for i, srv := range []*server{srvA, srvB} {
+		wg.Add(1)
+		go func(i int, srv *server) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = srv.sweepPendingInbound(context.Background(), time.Minute, 100)
+		}(i, srv)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("sweeper %d: %v", i, err)
+		}
+	}
+
+	claimed := results[0].Claimed + results[1].Claimed
+	if claimed != 1 {
+		t.Fatalf("claimed total = %d, want 1 (um sweeper claima, o outro sai vazio)", claimed)
+	}
+	relayed := results[0].Relayed + results[1].Relayed
+	if relayed != 1 {
+		t.Fatalf("relayed total = %d, want 1", relayed)
+	}
+
+	qaWaitFor(t, 5*time.Second, "exactly one SaaS delivery", func() bool {
+		return receiver.Hits() >= 1
+	})
+	time.Sleep(200 * time.Millisecond)
+	if hits := receiver.Hits(); hits != 1 {
+		t.Fatalf("SaaS deliveries = %d, want exatamente 1 sob dois sweepers concorrentes", hits)
+	}
+	if got := receiver.Received()[0].MetaMessageID; got != "wamid.QA.PENDING.RACE" {
+		t.Errorf("meta_message_id = %q, want wamid.QA.PENDING.RACE", got)
+	}
+}
+
+// TestQAPendingSweepReclaimsOrphanedClaim garante que um claim em relaying cujo
+// lease expirou (processo morto no meio do POST) volta a ser elegível.
+func TestQAPendingSweepReclaimsOrphanedClaim(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srv := newQAServer(t, stub, 100)
+
+	receiver := newQASaaSReceiver(t)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	conn := createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", receiver.URL())
+
+	logID := qaInsertPendingInbound(t, beleza.ID, conn.ID, beleza.Slug, "salao-1",
+		"wamid.QA.PENDING.ORPHAN", "5511900000000", "text_message", "oi",
+		time.Now().UTC().Add(-time.Hour))
+
+	// Simula um claim órfão: status=relaying com sweep_claimed_at antigo.
+	_, err := qaDB.Exec(`
+		UPDATE message_logs
+		SET status = 'relaying', sweep_claimed_at = NOW() - INTERVAL '10 minutes'
+		WHERE id = $1
+	`, logID)
+	if err != nil {
+		t.Fatalf("plant orphan claim: %v", err)
+	}
+
+	result, err := srv.sweepPendingInboundWithClaimTTL(context.Background(), time.Minute, time.Minute, 100)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.Claimed != 1 || result.Relayed != 1 {
+		t.Fatalf("claimed=%d relayed=%d, want 1 e 1 (orphan reclaim)", result.Claimed, result.Relayed)
+	}
+	if got := qaMessageLogStatus(t, logID); got != string(model.MessageStatusSent) {
+		t.Errorf("status = %q, want sent", got)
+	}
+	if hits := receiver.Hits(); hits != 1 {
+		t.Errorf("SaaS deliveries = %d, want 1", hits)
+	}
+}
+
+// TestQAPendingSweepUsesMotherWebhookFallback cobre o buraco: o caminho em
+// tempo real cai em MOTHER_SYSTEM_WEBHOOK_URL quando conexão e system não têm
+// webhook_url; o sweep antigo marcava failed. Agora o mesmo destino é usado.
+func TestQAPendingSweepUsesMotherWebhookFallback(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srv := newQAServer(t, stub, 100)
+
+	fallback := newQASaaSReceiver(t)
+	t.Setenv("MOTHER_SYSTEM_WEBHOOK_URL", fallback.URL())
+
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	// Conexão e system sem webhook_url — só o fallback global resolve o destino.
+	conn := createQAConnection(t, beleza, "salao-sem-webhook", "phone-beleza", "token-beleza", "")
+
+	logID := qaInsertPendingInbound(t, beleza.ID, conn.ID, beleza.Slug, "salao-sem-webhook",
+		"wamid.QA.PENDING.MOTHER", "5511900000000", "text_message", "oi",
+		time.Now().UTC().Add(-time.Hour))
+
+	result, err := srv.sweepPendingInbound(context.Background(), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("sweep pending inbound: %v", err)
+	}
+	if result.Relayed != 1 {
+		t.Fatalf("relayed = %d, want 1 via MOTHER_SYSTEM_WEBHOOK_URL", result.Relayed)
+	}
+	if got := qaMessageLogStatus(t, logID); got != string(model.MessageStatusSent) {
+		t.Errorf("status = %q, want sent", got)
+	}
+
+	received := fallback.Received()
+	if len(received) != 1 {
+		t.Fatalf("fallback recebeu %d repasses, want 1", len(received))
+	}
+	if received[0].MetaMessageID != "wamid.QA.PENDING.MOTHER" {
+		t.Errorf("meta_message_id = %q", received[0].MetaMessageID)
+	}
+	if !received[0].Replay {
+		t.Error("replay=true esperado no fallback do sweep")
+	}
+}
+
+// TestQAInboundRelayCarriesMetaMessageIDInBothFormats garante a chave
+// idempotente nos dois contratos em tempo real e no replay do sweep.
+func TestQAInboundRelayCarriesMetaMessageIDInBothFormats(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srv := newQAServer(t, stub, 100)
+
+	unifiedRecv := newQASaaSReceiver(t)
+	legacyRecv := newQASaaSReceiver(t)
+
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", legacyRecv.URL())
+	createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", unifiedRecv.URL())
+	createQAClientChannel(t, beleza, "salao-1", "phone-beleza")
+
+	const unifiedID = "wamid.QA.KEY.UNIFIED"
+	const legacyID = "wamid.QA.KEY.LEGACY"
+
+	if rec := qaPostMetaWebhook(t, srv, qaInboundTextPayloadWithID("phone-beleza", "5511977776666", "oi", unifiedID)); rec.Code != http.StatusOK {
+		t.Fatalf("unified status = %d", rec.Code)
+	}
+	qaWaitFor(t, 5*time.Second, "unified delivery", func() bool {
+		return len(unifiedRecv.Received()) >= 1
+	})
+	if got := unifiedRecv.Received()[0].MetaMessageID; got != unifiedID {
+		t.Errorf("unified meta_message_id = %q, want %q", got, unifiedID)
+	}
+
+	payload := qaInboundButtonPayloadWithID("phone-beleza", "5511900000000", "APPT_CONFIRM", legacyID)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/meta/phone-beleza", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", security.SignMetaPayload(qaMetaAppSecret(t), []byte(payload)))
+	req.SetPathValue("phone_number_id", "phone-beleza")
+	rec := httptest.NewRecorder()
+	srv.handleMetaWebhookEvent(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy status = %d", rec.Code)
+	}
+	qaWaitFor(t, 5*time.Second, "legacy delivery", func() bool {
+		return legacyRecv.Hits() >= 1
+	})
+	// O receptor decodifica no formato unificado; meta_message_id é o mesmo
+	// campo JSON nos dois contratos.
+	if got := legacyRecv.Received()[0].MetaMessageID; got != legacyID {
+		t.Errorf("legacy meta_message_id = %q, want %q", got, legacyID)
+	}
+
+	// Replay do sweep deve carregar a mesma chave.
+	sweepRecv := newQASaaSReceiver(t)
+	conn := createQAConnection(t, createQASystem(t, "Replay Sys", "replay_sys", ""), "t1", "phone-replay", "tok", sweepRecv.URL())
+	qaInsertPendingInbound(t, conn.SystemID, conn.ID, "replay_sys", "t1",
+		"wamid.QA.KEY.REPLAY", "5511900000000", "text_message", "replay-me",
+		time.Now().UTC().Add(-time.Hour))
+	if _, err := srv.sweepPendingInbound(context.Background(), time.Minute, 100); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	qaWaitFor(t, 5*time.Second, "sweep delivery", func() bool {
+		return len(sweepRecv.Received()) >= 1
+	})
+	replay := sweepRecv.Received()[0]
+	if replay.MetaMessageID != "wamid.QA.KEY.REPLAY" {
+		t.Errorf("replay meta_message_id = %q", replay.MetaMessageID)
+	}
+	if !replay.Replay {
+		t.Error("replay payload must set replay=true")
 	}
 }
 
