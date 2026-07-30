@@ -292,8 +292,9 @@ func main() {
 		Handler: CORSMiddleware(corsCfg, mux),
 	}
 
-	// O sweep de reconciliação do inbound roda enquanto o processo vive: fecha
-	// as linhas pending que o restart anterior deixou órfãs.
+	// As rotinas de manutenção rodam enquanto o processo vive: o sweep fecha as
+	// linhas pending que o restart anterior deixou órfãs, e o GC impede que
+	// oauth_state_nonces cresça sem limite (uma linha por state emitido).
 	sweepCtx, stopSweeper := context.WithCancel(context.Background())
 
 	sweeperDone := make(chan struct{})
@@ -303,6 +304,16 @@ func main() {
 		defer close(sweeperDone)
 
 		srv.runPendingSweeper(sweepCtx, pendingSweepConfigFromEnv())
+
+	}()
+
+	nonceGCDone := make(chan struct{})
+
+	go func() {
+
+		defer close(nonceGCDone)
+
+		srv.runOAuthNonceGC(sweepCtx, oauthNonceGCConfigFromEnv())
 
 	}()
 
@@ -362,6 +373,8 @@ func main() {
 	stopSweeper()
 
 	<-sweeperDone
+
+	<-nonceGCDone
 
 	log.Printf("WhatsApp Gateway stopped")
 

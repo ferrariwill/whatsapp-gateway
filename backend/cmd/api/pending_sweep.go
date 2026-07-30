@@ -123,6 +123,25 @@ func (s *server) sweepPendingInboundWithClaimTTL(
 			return result, err
 		}
 
+		// O reclaim de lease órfão é deliberadamente ilimitado no SQL: filtrar
+		// por relay_attempts lá deixaria a linha presa em relaying para sempre,
+		// sem nunca chegar a exhausted. O teto é aplicado aqui — acima dele a
+		// linha é encerrada sem novo POST.
+		if row.RelayAttempts > maxAttempts {
+			log.Printf("pending sweep: log %s reclaimed with %d attempts (max %d), marking exhausted",
+				row.ID, row.RelayAttempts, maxAttempts)
+			if s.closeRelayingInbound(ctx, row, repository.CloseRelayingUpdate{
+				Status:        model.MessageStatusFailed,
+				FailureReason: failureReasonExhausted,
+				LastError:     "relay attempts exhausted after orphaned lease reclaim",
+			}) {
+				result.Failed++
+			} else {
+				result.AlreadyDone++
+			}
+			continue
+		}
+
 		label := row.SistemaOrigem + "/" + row.ExternalClientID
 		targetURL := resolveInboundWebhookURL(row.TargetWebhookURL)
 
@@ -286,11 +305,14 @@ func dlqBackoffWithJitter(attempts int) time.Duration {
 	if exp > float64(max) {
 		exp = float64(max)
 	}
-	// Jitter uniforme em [0.5, 1.5) × delay.
+	// Jitter uniforme em [0.5, 1.5) × delay. O piso é 0.5 × exp, e não base:
+	// aplicar base como piso colapsaria em base todo sorteio abaixo de 1.0 na
+	// primeira tentativa (exp == base), reagendando metade dos replays no mesmo
+	// instante — exatamente o efeito manada que o jitter existe para evitar.
 	jitter := 0.5 + float64(randUint32()%1000)/1000.0
 	d := time.Duration(exp * jitter)
-	if d < base {
-		return base
+	if floor := time.Duration(exp * 0.5); d < floor {
+		d = floor
 	}
 	if d > max {
 		return max

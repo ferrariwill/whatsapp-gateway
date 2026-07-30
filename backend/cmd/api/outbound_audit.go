@@ -51,3 +51,26 @@ func (s *server) persistRateLimitedOutbound(
 	)
 	return nil
 }
+
+// auditRateLimitedOutbound persiste a tentativa recusada sem alterar a resposta
+// ao cliente.
+//
+// Política: a recusa continua 429 mesmo quando a auditoria falha. Devolver 500
+// transformaria uma indisponibilidade momentânea do banco em sinal de erro do
+// gateway para um cliente que na verdade está sendo barrado — e cliente que
+// trata 5xx com retry agressivo amplificaria exatamente o volume que o rate
+// limit existe para conter. A perda de auditoria fica no log, com o contexto de
+// onde ocorreu, para reconciliação posterior.
+func (s *server) auditRateLimitedOutbound(
+	ctx context.Context,
+	conn *model.WhatsAppConnection,
+	audit outboundAttemptAudit,
+	origin string,
+) {
+	if err := s.persistRateLimitedOutbound(ctx, conn, audit); err != nil {
+		log.Printf(
+			"audit lost for rate-limited outbound (%s): system=%s connection=%s tenant=%s: %v — still responding 429",
+			origin, conn.SystemID, conn.ID, conn.TenantID, err,
+		)
+	}
+}
