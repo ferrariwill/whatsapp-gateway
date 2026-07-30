@@ -1,0 +1,34 @@
+{{define "system_row.html"}}
+<tr id="system-row-{{.ID}}">
+  <td class="px-4 py-3 font-medium text-white">{{.Name}}</td>
+  <td class="px-4 py-3 font-mono text-xs text-emerald-300">{{.Slug}}</td>
+  <td class="px-4 py-3 font-mono text-xs text-slate-400">{{.APIKeyHint}}</td>
+  <td class="px-4 py-3 text-slate-300 max-w-xs truncate" title="{{.WebhookURL}}">{{if .WebhookURL}}{{.WebhookURL}}{{else}}—{{end}}</td>
+  <td class="px-4 py-3 text-slate-400">{{.CreatedAt}}</td>
+  <td class="px-4 py-3">
+    <div class="flex flex-wrap gap-2">
+      <button
+        type="button"
+        class="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800"
+        data-system-id="{{.ID}}"
+        data-system-name="{{.Name}}"
+        data-system-slug="{{.Slug}}"
+        data-system-webhook="{{.WebhookURL}}"
+        onclick="openEditSystemModal(this)"
+      >
+        Editar
+      </button>
+      <button
+        type="button"
+        class="rounded-lg border border-red-500/30 px-2.5 py-1 text-xs text-red-300 hover:bg-red-500/10"
+        hx-post="/admin/systems/{{.ID}}/delete"
+        hx-swap="none"
+        hx-confirm="Excluir a aplicação &quot;{{.Name}}&quot;? Todos os canais vinculados serão removidos."
+        hx-on::after-request="removeSystemRow(event, 'system-row-{{.ID}}')"
+      >
+        Excluir
+      </button>
+    </div>
+  </td>
+</tr>
+{{end}}

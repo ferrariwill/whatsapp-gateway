@@ -1,0 +1,63 @@
+{{define "connection_row.html"}}
+<tr id="connection-row-{{.ConnectionID}}" class="{{if .IsSuspendedSpam}}bg-red-950/20{{end}}">
+  <td class="px-4 py-3">
+    <div class="font-medium text-white">{{.SystemName}}</div>
+    <div class="font-mono text-xs text-emerald-300">{{.SystemSlug}}</div>
+  </td>
+  <td class="px-4 py-3 font-mono text-slate-300">{{.TenantID}}</td>
+  <td class="px-4 py-3 font-mono text-xs text-slate-400">{{.WabaID}}</td>
+  <td class="px-4 py-3 font-mono text-xs text-emerald-300">{{.PhoneNumberID}}</td>
+  <td class="px-4 py-3 font-mono text-slate-200">{{if .WhatsAppPhoneNumber}}{{.WhatsAppPhoneNumber}}{{else}}—{{end}}</td>
+  <td class="px-4 py-3 font-mono text-xs text-slate-500">{{.AccessTokenHint}}</td>
+  <td class="px-4 py-3 text-slate-400 max-w-xs truncate" title="{{.WebhookURL}}">{{if .WebhookURL}}{{.WebhookURL}}{{else}}—{{end}}</td>
+  <td class="px-4 py-3">
+    {{if .IsSuspendedSpam}}
+    <span class="inline-flex items-center rounded-full bg-red-500/15 px-2.5 py-1 text-xs font-semibold text-red-300 ring-1 ring-red-500/30">SUSPENDED_SPAM</span>
+    {{else}}
+    <span class="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300 ring-1 ring-emerald-500/20">{{.Status}}</span>
+    {{end}}
+  </td>
+  <td class="px-4 py-3 text-slate-400">{{.CreatedAt}}</td>
+  <td class="px-4 py-3">
+    <div class="flex flex-wrap gap-2">
+      {{if .IsSuspendedSpam}}
+      <button
+        type="button"
+        class="inline-flex items-center rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20"
+        hx-post="/admin/connections/{{.ConnectionID}}/unblock"
+        hx-target="#connection-row-{{.ConnectionID}}"
+        hx-swap="outerHTML"
+        hx-confirm="Desbloquear esta conexão e limpar a proteção anti-spam em memória?"
+      >
+        🔓 Desbloquear
+      </button>
+      {{end}}
+      <button
+        type="button"
+        class="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800"
+        data-connection-id="{{.ConnectionID}}"
+        data-system-id="{{.SystemID}}"
+        data-tenant-id="{{.TenantID}}"
+        data-waba-id="{{.WabaID}}"
+        data-phone-number-id="{{.PhoneNumberID}}"
+        data-access-token=""
+        data-webhook-url="{{.WebhookURL}}"
+        data-whatsapp-phone="{{.WhatsAppPhoneNumber}}"
+        onclick="openEditConnectionModal(this)"
+      >
+        Editar
+      </button>
+      <button
+        type="button"
+        class="rounded-lg border border-red-500/30 px-2.5 py-1 text-xs text-red-300 hover:bg-red-500/10"
+        hx-post="/admin/connections/{{.ConnectionID}}/delete"
+        hx-swap="none"
+        hx-confirm="Excluir a conexão {{.SystemSlug}}/{{.TenantID}}?"
+        hx-on::after-request="removeConnectionRow(event, 'connection-row-{{.ConnectionID}}')"
+      >
+        Excluir
+      </button>
+    </div>
+  </td>
+</tr>
+{{end}}

@@ -6,11 +6,31 @@ import "time"
 Segurança de dados sensíveis (pacote internal/security):
 
   - Hash (SHA-256 via security.HashAPIKey):
-      APIKeyHash → digest da chave de API do sistema mãe (sk_live_...)
+      APIKeyHash → digest da chave de API do hub (sk_live_...)
 
-  - Token Meta (META_GLOBAL_TOKEN) e WABA (META_WABA_ID):
-      Armazenados apenas em variáveis de ambiente do servidor — nunca no banco.
+  - AccessToken Meta (WhatsAppConnection.AccessToken):
+      Armazenado por conexão/tenant no banco — nunca em variáveis globais do servidor.
 */
+
+// WhatsAppConnection representa o chip WhatsApp de um tenant SaaS (multi-tenant).
+type WhatsAppConnection struct {
+	ID                  string    `json:"id" db:"id"`
+	SystemID            string    `json:"system_id" db:"system_id"`
+	SistemaOrigem       string    `json:"sistema_origem" db:"sistema_origem"`
+	TenantID            string    `json:"tenant_id" db:"tenant_id"`
+	WabaID              string    `json:"waba_id" db:"waba_id"`
+	PhoneNumberID       string    `json:"phone_number_id" db:"phone_number_id"`
+	AccessToken         string    `json:"-" db:"access_token"`
+	WebhookURL          string    `json:"webhook_url,omitempty" db:"webhook_url"`
+	WhatsAppPhoneNumber string    `json:"whatsapp_phone_number,omitempty" db:"whatsapp_phone_number"`
+	Status              string    `json:"status" db:"status"`
+	CreatedAt           time.Time `json:"created_at" db:"created_at"`
+}
+
+const (
+	ConnectionStatusActive        = "ACTIVE"
+	ConnectionStatusSuspendedSpam = "SUSPENDED_SPAM"
+)
 
 // ClientChannel representa o chip WhatsApp de um salão/clínica (profissional).
 type ClientChannel struct {
@@ -45,6 +65,7 @@ const (
 type System struct {
 	ID         string    `json:"id" db:"id"`
 	Name       string    `json:"name" db:"name"`
+	Slug       string    `json:"slug" db:"slug"`
 	APIKeyHash string    `json:"-" db:"api_key_hash"`
 	WebhookURL string    `json:"webhook_url,omitempty" db:"webhook_url"`
 	CreatedAt  time.Time `json:"created_at" db:"created_at"`
@@ -83,6 +104,8 @@ type MessageLog struct {
 	ExternalClientID string           `json:"external_client_id,omitempty" db:"external_client_id"`
 	MetaMessageID    string           `json:"meta_message_id,omitempty" db:"meta_message_id"`
 	AppointmentID    string           `json:"appointment_id" db:"appointment_id"`
+	ConnectionID     string           `json:"connection_id,omitempty" db:"connection_id"`
+	SistemaOrigem    string           `json:"sistema_origem,omitempty" db:"sistema_origem"`
 	PhoneNumber      string           `json:"phone_number" db:"phone_number"`
 	TemplateName     string           `json:"template_name,omitempty" db:"template_name"`
 	SentContent      string           `json:"sent_content,omitempty" db:"sent_content"`

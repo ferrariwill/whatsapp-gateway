@@ -1,0 +1,112 @@
+{{define "head.html"}}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{if .Title}}{{.Title}}{{else}}WhatsApp Gateway{{end}}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<script>
+  function copyToClipboard(button) {
+    const value = button.getAttribute('data-copy');
+    if (!value) return;
+    navigator.clipboard.writeText(value).then(function () {
+      const original = button.textContent;
+      button.textContent = 'Copiado!';
+      button.classList.add('bg-emerald-600');
+      setTimeout(function () {
+        button.textContent = original;
+        button.classList.remove('bg-emerald-600');
+      }, 1500);
+    });
+  }
+
+  function ensureTableEmptyState(tbodyId, emptyHtml) {
+    const tbody = document.getElementById(tbodyId);
+    if (tbody && !tbody.querySelector('tr')) {
+      tbody.innerHTML = emptyHtml;
+    }
+  }
+
+  const channelsEmptyRowHtml = '<tr id="channels-empty-row"><td colspan="8" class="px-4 py-8 text-center text-slate-500">Nenhum canal vinculado ainda.</td></tr>';
+  const connectionsEmptyRowHtml = '<tr id="connections-empty-row"><td colspan="10" class="px-4 py-8 text-center text-slate-500">Nenhuma conexão cadastrada. Crie a primeira para habilitar POST /send-notification.</td></tr>';
+  const systemsEmptyRowHtml = '<tr id="systems-empty-row"><td colspan="6" class="px-4 py-8 text-center text-slate-500">Nenhuma aplicação cadastrada. Crie a primeira antes de vincular canais.</td></tr>';
+
+  function removeConnectionRow(event, rowId) {
+    removeRowAfterDelete(event, rowId, 'connections-tbody', connectionsEmptyRowHtml);
+  }
+
+  function removeChannelRow(event, rowId) {
+    removeRowAfterDelete(event, rowId, 'channels-tbody', channelsEmptyRowHtml);
+  }
+
+  function removeSystemRow(event, rowId) {
+    removeRowAfterDelete(event, rowId, 'systems-tbody', systemsEmptyRowHtml);
+  }
+
+  function removeRowAfterDelete(event, rowId, tbodyId, emptyHtml) {
+    if (!event.detail.successful) {
+      return;
+    }
+    document.getElementById(rowId)?.remove();
+    ensureTableEmptyState(tbodyId, emptyHtml);
+  }
+
+  function openModal(id) {
+    document.getElementById(id).classList.remove('hidden');
+    document.getElementById('channel-form-feedback')?.replaceChildren();
+    document.getElementById('system-form-feedback')?.replaceChildren();
+    document.getElementById('connection-form-feedback')?.replaceChildren();
+    document.getElementById('edit-system-form-feedback')?.replaceChildren();
+    document.getElementById('edit-channel-form-feedback')?.replaceChildren();
+    document.getElementById('edit-connection-form-feedback')?.replaceChildren();
+  }
+
+  function closeModal(id) {
+    document.getElementById(id).classList.add('hidden');
+  }
+
+  function openEditSystemModal(button) {
+    const form = document.getElementById('edit-system-form');
+    form.action = '/admin/systems/' + button.dataset.systemId;
+    form.setAttribute('hx-post', form.action);
+    form.setAttribute('hx-target', '#system-row-' + button.dataset.systemId);
+    form.querySelector('[name=name]').value = button.dataset.systemName || '';
+    form.querySelector('[name=slug]').value = button.dataset.systemSlug || '';
+    form.querySelector('[name=webhook_url]').value = button.dataset.systemWebhook || '';
+    document.getElementById('edit-system-form-feedback')?.replaceChildren();
+    htmx.process(form);
+    openModal('edit-system-modal');
+  }
+
+  function openEditChannelModal(button) {
+    const form = document.getElementById('edit-channel-form');
+    form.action = '/admin/channels/' + button.dataset.channelId;
+    form.setAttribute('hx-post', form.action);
+    form.setAttribute('hx-target', '#channel-row-' + button.dataset.channelId);
+    form.querySelector('[name=system_id]').value = button.dataset.systemId || '';
+    form.querySelector('[name=salon_name]').value = button.dataset.salonName || '';
+    form.querySelector('[name=external_client_id]').value = button.dataset.externalClientId || '';
+    form.querySelector('[name=whatsapp_phone_number]').value = button.dataset.whatsappPhone || '';
+    form.querySelector('[name=phone_number_id]').value = button.dataset.phoneNumberId || '';
+    document.getElementById('edit-channel-form-feedback')?.replaceChildren();
+    htmx.process(form);
+    openModal('edit-channel-modal');
+  }
+
+  function openEditConnectionModal(button) {
+    const form = document.getElementById('edit-connection-form');
+    form.action = '/admin/connections/' + button.dataset.connectionId;
+    form.setAttribute('hx-post', form.action);
+    form.setAttribute('hx-target', '#connection-row-' + button.dataset.connectionId);
+    form.querySelector('[name=system_id]').value = button.dataset.systemId || '';
+    form.querySelector('[name=tenant_id]').value = button.dataset.tenantId || '';
+    form.querySelector('[name=waba_id]').value = button.dataset.wabaId || '';
+    form.querySelector('[name=phone_number_id]').value = button.dataset.phoneNumberId || '';
+    form.querySelector('[name=access_token]').value = '';
+    form.querySelector('[name=webhook_url]').value = button.dataset.webhookUrl || '';
+    form.querySelector('[name=whatsapp_phone_number]').value = button.dataset.whatsappPhone || '';
+    document.getElementById('edit-connection-form-feedback')?.replaceChildren();
+    htmx.process(form);
+    openModal('edit-connection-modal');
+  }
+</script>
+{{end}}

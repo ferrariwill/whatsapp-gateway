@@ -1,0 +1,2 @@
+DELETE FROM systems
+WHERE api_key_hash = '2a0f7fcee68e27731fc5c39bdb0a8c4b2ec7159bffab80efb0c5c624379da51a';

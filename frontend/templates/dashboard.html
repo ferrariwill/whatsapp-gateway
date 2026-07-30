@@ -29,13 +29,101 @@
     <section class="rounded-2xl border border-slate-800 bg-slate-900/50 p-6">
       <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 class="text-lg font-semibold text-white">Canais WhatsApp</h2>
-          <p class="text-sm text-slate-400">Vincule chips da Meta aos clientes externos de cada aplicação.</p>
+          <h2 class="text-lg font-semibold text-white">Aplicações (Systems)</h2>
+          <p class="text-sm text-slate-400">Cadastre as aplicações mãe que consomem a API do gateway. A chave de API é exibida apenas na criação.</p>
         </div>
         <button
           type="button"
-          onclick="openModal('add-channel-modal')"
+          onclick="openModal('add-system-modal')"
           class="inline-flex items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400"
+        >
+          + Nova aplicação
+        </button>
+      </div>
+
+      <div id="system-api-key-reveal"></div>
+
+      <div class="overflow-x-auto rounded-xl border border-slate-800">
+        <table class="min-w-full divide-y divide-slate-800 text-sm">
+          <thead class="bg-slate-950/80">
+            <tr>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Nome</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Slug (OAuth state)</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">API Key (hash)</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Webhook URL</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Cadastrado em</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Ações</th>
+            </tr>
+          </thead>
+          <tbody id="systems-tbody" class="divide-y divide-slate-800 bg-slate-900/30">
+            {{range .Systems}}
+            {{template "system_row.html" .}}
+            {{else}}
+            <tr id="systems-empty-row">
+              <td colspan="6" class="px-4 py-8 text-center text-slate-500">Nenhuma aplicação cadastrada. Crie a primeira antes de vincular canais.</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="rounded-2xl border border-emerald-500/20 bg-slate-900/50 p-6 ring-1 ring-emerald-500/10">
+      <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 class="text-lg font-semibold text-white">Conexões WhatsApp (Multi-tenant)</h2>
+          <p class="text-sm text-slate-400">Credenciais Meta por tenant — token, WABA e Phone Number ID ficam no banco, não no .env.</p>
+        </div>
+        <button
+          type="button"
+          onclick="openModal('add-connection-modal')"
+          class="inline-flex items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400"
+        >
+          + Nova conexão
+        </button>
+      </div>
+
+      <div class="overflow-x-auto rounded-xl border border-slate-800">
+        <table class="min-w-full divide-y divide-slate-800 text-sm">
+          <thead class="bg-slate-950/80">
+            <tr>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Aplicação mãe</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Tenant ID</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">WABA ID</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Phone Number ID</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Telefone</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Token (hint)</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Webhook SaaS</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Status</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Cadastrado em</th>
+              <th class="px-4 py-3 text-left font-medium text-slate-400">Ações</th>
+            </tr>
+          </thead>
+          <tbody id="connections-tbody" class="divide-y divide-slate-800 bg-slate-900/30">
+            {{range .Connections}}
+            {{template "connection_row.html" .}}
+            {{else}}
+            <tr id="connections-empty-row">
+              <td colspan="10" class="px-4 py-8 text-center text-slate-500">Nenhuma conexão cadastrada. Crie a primeira para habilitar POST /send-notification.</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="rounded-2xl border border-slate-800 bg-slate-900/50 p-6">
+      <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 class="text-lg font-semibold text-white">Canais WhatsApp (legado)</h2>
+          <p class="text-sm text-slate-400">Vincule chips da Meta aos clientes externos de cada aplicação.</p>
+        </div>
+        <button
+          id="add-channel-btn"
+          type="button"
+          onclick="openModal('add-channel-modal')"
+          {{if not .HasSystems}}disabled title="Cadastre uma aplicação primeiro"{{end}}
+          class="inline-flex items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
         >
           + Vincular canal
         </button>
@@ -159,6 +247,8 @@
       <button type="button" onclick="closeModal('add-channel-modal')" class="text-slate-400 hover:text-white">&times;</button>
     </div>
 
+    <div id="channel-form-feedback"></div>
+
     <form
       hx-post="/admin/channels"
       hx-target="#channels-tbody"
@@ -166,6 +256,15 @@
       hx-on::after-request="if(event.detail.successful){ closeModal('add-channel-modal'); this.reset(); document.getElementById('channels-empty-row')?.remove(); }"
       class="space-y-4"
     >
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Aplicação</label>
+        <select id="add-channel-system-select" name="system_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20">
+          {{range .Systems}}
+          <option value="{{.ID}}">{{.Name}}</option>
+          {{end}}
+        </select>
+      </div>
+
       <div>
         <label class="mb-1 block text-sm text-slate-300">Rótulo do canal</label>
         <input name="salon_name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20" placeholder="Canal principal">
@@ -192,6 +291,244 @@
       <div class="flex justify-end gap-3 pt-2">
         <button type="button" onclick="closeModal('add-channel-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
         <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Salvar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="add-system-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
+  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+    <div class="mb-6 flex items-center justify-between">
+      <div>
+        <h3 class="text-lg font-semibold text-white">Nova aplicação</h3>
+        <p class="text-sm text-slate-400">Gera automaticamente uma API Key (<code class="text-emerald-300">sk_live_…</code>).</p>
+      </div>
+      <button type="button" onclick="closeModal('add-system-modal')" class="text-slate-400 hover:text-white">&times;</button>
+    </div>
+    <div id="system-form-feedback"></div>
+    <form
+      hx-post="/admin/systems"
+      hx-target="#systems-tbody"
+      hx-swap="beforeend"
+      hx-on::after-request="if(event.detail.successful){ closeModal('add-system-modal'); this.reset(); document.getElementById('systems-empty-row')?.remove(); }"
+      class="space-y-4"
+    >
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Nome da aplicação</label>
+        <input name="name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50" placeholder="Beleza Web">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Slug (identificador único)</label>
+        <input name="slug" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-emerald-300 outline-none focus:border-emerald-500/50" placeholder="beleza_web (opcional — gerado do nome)">
+        <p class="mt-1 text-xs text-slate-500">Usado no OAuth state: <code class="text-emerald-300">{slug}_{tenant_id}</code></p>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Webhook URL (opcional)</label>
+        <input name="webhook_url" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50" placeholder="https://sua-app.com/webhook">
+      </div>
+      <div class="flex justify-end gap-3 pt-2">
+        <button type="button" onclick="closeModal('add-system-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Salvar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="edit-system-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
+  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+    <div class="mb-6 flex items-center justify-between">
+      <div>
+        <h3 class="text-lg font-semibold text-white">Editar aplicação</h3>
+        <p class="text-sm text-slate-400">A API Key não pode ser alterada aqui — gere uma nova aplicação se necessário.</p>
+      </div>
+      <button type="button" onclick="closeModal('edit-system-modal')" class="text-slate-400 hover:text-white">&times;</button>
+    </div>
+    <div id="edit-system-form-feedback"></div>
+    <form
+      id="edit-system-form"
+      hx-post=""
+      hx-swap="outerHTML"
+      hx-on::after-request="if(event.detail.successful) closeModal('edit-system-modal')"
+      class="space-y-4"
+    >
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Nome da aplicação</label>
+        <input name="name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Slug (identificador único)</label>
+        <input name="slug" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-emerald-300 outline-none focus:border-emerald-500/50">
+        <p class="mt-1 text-xs text-slate-500">Embedded Signup: state = <code class="text-emerald-300">{slug}_{tenant_id}</code></p>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Webhook URL</label>
+        <input name="webhook_url" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div class="flex justify-end gap-3 pt-2">
+        <button type="button" onclick="closeModal('edit-system-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Atualizar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="edit-channel-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
+  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+    <div class="mb-6 flex items-center justify-between">
+      <div>
+        <h3 class="text-lg font-semibold text-white">Editar canal WhatsApp</h3>
+      </div>
+      <button type="button" onclick="closeModal('edit-channel-modal')" class="text-slate-400 hover:text-white">&times;</button>
+    </div>
+    <div id="edit-channel-form-feedback"></div>
+    <form
+      id="edit-channel-form"
+      hx-post=""
+      hx-swap="outerHTML"
+      hx-on::after-request="if(event.detail.successful) closeModal('edit-channel-modal')"
+      class="space-y-4"
+    >
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Aplicação</label>
+        <select id="edit-channel-system-select" name="system_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+          {{range .Systems}}
+          <option value="{{.ID}}">{{.Name}}</option>
+          {{end}}
+        </select>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Rótulo do canal</label>
+        <input name="salon_name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">ID do cliente externo</label>
+        <input name="external_client_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Número de telefone</label>
+        <input name="whatsapp_phone_number" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Phone Number ID da Meta</label>
+        <input name="phone_number_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div class="flex justify-end gap-3 pt-2">
+        <button type="button" onclick="closeModal('edit-channel-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Atualizar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="add-connection-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
+  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+    <div class="mb-6 flex items-center justify-between">
+      <div>
+        <h3 class="text-lg font-semibold text-white">Nova conexão WhatsApp</h3>
+        <p class="text-sm text-slate-400">Credenciais Meta exclusivas do tenant (clínica, salão, etc.).</p>
+      </div>
+      <button type="button" onclick="closeModal('add-connection-modal')" class="text-slate-400 hover:text-white">&times;</button>
+    </div>
+    <div id="connection-form-feedback"></div>
+    <form
+      hx-post="/admin/connections"
+      hx-target="#connections-tbody"
+      hx-swap="beforeend"
+      hx-on::after-request="if(event.detail.successful){ closeModal('add-connection-modal'); this.reset(); document.getElementById('connections-empty-row')?.remove(); }"
+      class="space-y-4"
+    >
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Aplicação mãe</label>
+        <select id="add-connection-system-select" name="system_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+          <option value="">Selecione…</option>
+          {{range .SystemOptions}}
+          <option value="{{.ID}}">{{.Name}} ({{.Slug}})</option>
+          {{end}}
+        </select>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Tenant ID</label>
+        <input name="tenant_id" required placeholder="ID da empresa no SaaS" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">WABA ID</label>
+        <input name="waba_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Phone Number ID</label>
+        <input name="phone_number_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Access Token (longa duração)</label>
+        <input name="access_token" required type="password" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Webhook URL do SaaS</label>
+        <input name="webhook_url" placeholder="https://app.exemplo.com/webhook/whatsapp" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Telefone WhatsApp (opcional)</label>
+        <input name="whatsapp_phone_number" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div class="flex justify-end gap-3 pt-2">
+        <button type="button" onclick="closeModal('add-connection-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Salvar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="edit-connection-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
+  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+    <div class="mb-6 flex items-center justify-between">
+      <div>
+        <h3 class="text-lg font-semibold text-white">Editar conexão WhatsApp</h3>
+      </div>
+      <button type="button" onclick="closeModal('edit-connection-modal')" class="text-slate-400 hover:text-white">&times;</button>
+    </div>
+    <div id="edit-connection-form-feedback"></div>
+    <form
+      id="edit-connection-form"
+      hx-post=""
+      hx-swap="outerHTML"
+      hx-on::after-request="if(event.detail.successful) closeModal('edit-connection-modal')"
+      class="space-y-4"
+    >
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Aplicação mãe</label>
+        <select id="edit-connection-system-select" name="system_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+          {{range $.SystemOptions}}
+          <option value="{{.ID}}">{{.Name}} ({{.Slug}})</option>
+          {{end}}
+        </select>
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Tenant ID</label>
+        <input name="tenant_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">WABA ID</label>
+        <input name="waba_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Phone Number ID</label>
+        <input name="phone_number_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Access Token (deixe vazio para manter)</label>
+        <input name="access_token" type="password" placeholder="••••••••" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Webhook URL do SaaS</label>
+        <input name="webhook_url" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div>
+        <label class="mb-1 block text-sm text-slate-300">Telefone WhatsApp (opcional)</label>
+        <input name="whatsapp_phone_number" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+      </div>
+      <div class="flex justify-end gap-3 pt-2">
+        <button type="button" onclick="closeModal('edit-connection-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Atualizar</button>
       </div>
     </form>
   </div>

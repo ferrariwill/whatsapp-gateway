@@ -1,0 +1,61 @@
+# Binários Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Testes e cobertura
+*.test
+*.out
+coverage.html
+coverage.out
+
+# Dependências
+vendor/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Variáveis de ambiente e segredos
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# SO
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Docker / logs locais
+*.log
+
+# Arquivos temporários do projeto
+tmp-*
+tmp/
+.webhook-tunnel-url
+.ngrok-webhook-url
+
+# Python (scripts auxiliares)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node (se adicionar frontend com npm depois)
+node_modules/

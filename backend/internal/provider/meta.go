@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 )
 
@@ -20,16 +19,14 @@ const (
 	ButtonPayloadReschedule = "APPT_RESCHEDULE"
 )
 
-// MetaProvider comunica com a WhatsApp Cloud API usando o token global do servidor.
+// MetaProvider comunica com a WhatsApp Cloud API usando credenciais por conexão/tenant.
 type MetaProvider struct {
 	client       *http.Client
-	accessToken  string
-	wabaID       string
 	apiVersion   string
 	languageCode string
 }
 
-// NewMetaProvider cria um provider que lê META_GLOBAL_TOKEN e META_WABA_ID do ambiente.
+// NewMetaProvider cria um provider stateless; o access token é passado em cada chamada.
 func NewMetaProvider(client *http.Client, apiVersion string) *MetaProvider {
 	if client == nil {
 		client = http.DefaultClient
@@ -37,11 +34,8 @@ func NewMetaProvider(client *http.Client, apiVersion string) *MetaProvider {
 	if apiVersion == "" {
 		apiVersion = defaultAPIVersion
 	}
-
 	return &MetaProvider{
 		client:       client,
-		accessToken:  strings.TrimSpace(os.Getenv("META_GLOBAL_TOKEN")),
-		wabaID:       strings.TrimSpace(os.Getenv("META_WABA_ID")),
 		apiVersion:   apiVersion,
 		languageCode: defaultLanguageCode,
 	}
@@ -67,7 +61,7 @@ type TemplateLanguage struct {
 	Code string `json:"code"`
 }
 
-// TemplateComponent agrupa parámetros dinâmicos de body ou botões interativos no envio.
+// TemplateComponent agrupa parâmetros dinâmicos de body ou botões interativos no envio.
 type TemplateComponent struct {
 	Type       string              `json:"type"`
 	SubType    string              `json:"sub_type,omitempty"`
@@ -175,12 +169,18 @@ func buildCreateTemplateComponents(textBody string, buttons []string) []MessageT
 	return components
 }
 
-func (p *MetaProvider) CreateTemplate(ctx context.Context, name, category, textBody string, buttons []string) (string, error) {
-	if p.accessToken == "" {
-		return "", fmt.Errorf("META_GLOBAL_TOKEN is required")
+func (p *MetaProvider) CreateTemplate(
+	ctx context.Context,
+	accessToken, wabaID, name, category, textBody string,
+	buttons []string,
+) (string, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	wabaID = strings.TrimSpace(wabaID)
+	if accessToken == "" {
+		return "", fmt.Errorf("access token is required")
 	}
-	if p.wabaID == "" {
-		return "", fmt.Errorf("META_WABA_ID is required")
+	if wabaID == "" {
+		return "", fmt.Errorf("waba id is required")
 	}
 
 	name = strings.TrimSpace(name)
@@ -205,7 +205,7 @@ func (p *MetaProvider) CreateTemplate(ctx context.Context, name, category, textB
 		return "", fmt.Errorf("marshal create template payload: %w", err)
 	}
 
-	respBody, err := p.doMetaRequest(ctx, http.MethodPost, p.messageTemplatesURL(), body)
+	respBody, err := p.doMetaRequest(ctx, accessToken, http.MethodPost, p.messageTemplatesURL(wabaID), body)
 	if err != nil {
 		return "", err
 	}
@@ -220,15 +220,20 @@ func (p *MetaProvider) CreateTemplate(ctx context.Context, name, category, textB
 	return created.ID, nil
 }
 
-func (p *MetaProvider) GetTemplatesStatus(ctx context.Context) ([]MetaTemplateResponse, error) {
-	if p.accessToken == "" {
-		return nil, fmt.Errorf("META_GLOBAL_TOKEN is required")
+func (p *MetaProvider) GetTemplatesStatus(
+	ctx context.Context,
+	accessToken, wabaID string,
+) ([]MetaTemplateResponse, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	wabaID = strings.TrimSpace(wabaID)
+	if accessToken == "" {
+		return nil, fmt.Errorf("access token is required")
 	}
-	if p.wabaID == "" {
-		return nil, fmt.Errorf("META_WABA_ID is required")
+	if wabaID == "" {
+		return nil, fmt.Errorf("waba id is required")
 	}
 
-	respBody, err := p.doMetaRequest(ctx, http.MethodGet, p.messageTemplatesURL(), nil)
+	respBody, err := p.doMetaRequest(ctx, accessToken, http.MethodGet, p.messageTemplatesURL(wabaID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -248,18 +253,22 @@ func (p *MetaProvider) GetTemplatesStatus(ctx context.Context) ([]MetaTemplateRe
 	return templates, nil
 }
 
-// SendAppointmentTemplate envia via o chip indicado por phoneNumberID e retorna o wamid da Meta.
-func (p *MetaProvider) SendAppointmentTemplate(
+// SendPlainTemplate envia template sem componentes dinâmicos (ex.: hello_world).
+func (p *MetaProvider) SendPlainTemplate(
 	ctx context.Context,
-	phoneNumberID, to, templateName string,
-	vars []string,
+	accessToken, phoneNumberID, to, templateName, languageCode string,
 ) (string, error) {
-	if p.accessToken == "" {
-		return "", fmt.Errorf("META_GLOBAL_TOKEN is required")
-	}
+	accessToken = strings.TrimSpace(accessToken)
 	phoneNumberID = strings.TrimSpace(phoneNumberID)
 	to = strings.TrimSpace(to)
 	templateName = strings.TrimSpace(templateName)
+	languageCode = strings.TrimSpace(languageCode)
+	if languageCode == "" {
+		languageCode = p.languageCode
+	}
+	if accessToken == "" {
+		return "", fmt.Errorf("access token is required")
+	}
 	if phoneNumberID == "" {
 		return "", fmt.Errorf("phone number id is required")
 	}
@@ -275,13 +284,8 @@ func (p *MetaProvider) SendAppointmentTemplate(
 		To:               to,
 		Type:             "template",
 		Template: Template{
-			Name: templateName,
-			Language: TemplateLanguage{Code: p.languageCode},
-			Components: []TemplateComponent{
-				BodyComponent(vars),
-				QuickReplyButton(0, ButtonPayloadConfirm),
-				QuickReplyButton(1, ButtonPayloadReschedule),
-			},
+			Name:     templateName,
+			Language: TemplateLanguage{Code: languageCode},
 		},
 	}
 
@@ -290,7 +294,7 @@ func (p *MetaProvider) SendAppointmentTemplate(
 		return "", fmt.Errorf("marshal template payload: %w", err)
 	}
 
-	respBody, err := p.doMetaRequest(ctx, http.MethodPost, p.messagesURL(phoneNumberID), body)
+	respBody, err := p.doMetaRequest(ctx, accessToken, http.MethodPost, p.messagesURL(phoneNumberID), body)
 	if err != nil {
 		return "", err
 	}
@@ -305,14 +309,73 @@ func (p *MetaProvider) SendAppointmentTemplate(
 	return strings.TrimSpace(sent.Messages[0].ID), nil
 }
 
-// SendTextMessage envia uma mensagem de texto livre (requer janela de atendimento ou número de teste).
-func (p *MetaProvider) SendTextMessage(ctx context.Context, phoneNumberID, to, body string) error {
-	if p.accessToken == "" {
-		return fmt.Errorf("META_GLOBAL_TOKEN is required")
+// SendAppointmentTemplate envia via o chip do tenant e retorna o wamid da Meta.
+func (p *MetaProvider) SendAppointmentTemplate(
+	ctx context.Context,
+	accessToken, phoneNumberID, to, templateName string,
+	vars []string,
+) (string, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	phoneNumberID = strings.TrimSpace(phoneNumberID)
+	to = strings.TrimSpace(to)
+	templateName = strings.TrimSpace(templateName)
+	if accessToken == "" {
+		return "", fmt.Errorf("access token is required")
 	}
+	if phoneNumberID == "" {
+		return "", fmt.Errorf("phone number id is required")
+	}
+	if to == "" {
+		return "", fmt.Errorf("recipient phone number is required")
+	}
+	if templateName == "" {
+		return "", fmt.Errorf("template name is required")
+	}
+
+	payload := SendMessageRequest{
+		MessagingProduct: "whatsapp",
+		To:               to,
+		Type:             "template",
+		Template: Template{
+			Name:     templateName,
+			Language: TemplateLanguage{Code: p.languageCode},
+			Components: []TemplateComponent{
+				BodyComponent(vars),
+				QuickReplyButton(0, ButtonPayloadConfirm),
+				QuickReplyButton(1, ButtonPayloadReschedule),
+			},
+		},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal template payload: %w", err)
+	}
+
+	respBody, err := p.doMetaRequest(ctx, accessToken, http.MethodPost, p.messagesURL(phoneNumberID), body)
+	if err != nil {
+		return "", err
+	}
+
+	var sent sendMessageResponse
+	if err := json.Unmarshal(respBody, &sent); err != nil {
+		return "", fmt.Errorf("decode send message response: %w", err)
+	}
+	if len(sent.Messages) == 0 || strings.TrimSpace(sent.Messages[0].ID) == "" {
+		return "", fmt.Errorf("meta api returned empty message id")
+	}
+	return strings.TrimSpace(sent.Messages[0].ID), nil
+}
+
+// SendTextMessage envia mensagem de texto livre com o token do tenant.
+func (p *MetaProvider) SendTextMessage(ctx context.Context, accessToken, phoneNumberID, to, body string) error {
+	accessToken = strings.TrimSpace(accessToken)
 	phoneNumberID = strings.TrimSpace(phoneNumberID)
 	to = strings.TrimSpace(to)
 	body = strings.TrimSpace(body)
+	if accessToken == "" {
+		return fmt.Errorf("access token is required")
+	}
 	if phoneNumberID == "" {
 		return fmt.Errorf("phone number id is required")
 	}
@@ -338,24 +401,23 @@ func (p *MetaProvider) SendTextMessage(ctx context.Context, phoneNumberID, to, b
 		return fmt.Errorf("marshal text payload: %w", err)
 	}
 
-	if _, err := p.doMetaRequest(ctx, http.MethodPost, p.messagesURL(phoneNumberID), bodyBytes); err != nil {
-		return err
-	}
-	return nil
+	_, err = p.doMetaRequest(ctx, accessToken, http.MethodPost, p.messagesURL(phoneNumberID), bodyBytes)
+	return err
 }
 
-// SendUtilityTemplate envia um template aprovado com parâmetros apenas no corpo (sem botões).
+// SendUtilityTemplate envia template utility com token do tenant.
 func (p *MetaProvider) SendUtilityTemplate(
 	ctx context.Context,
-	phoneNumberID, to, templateName string,
+	accessToken, phoneNumberID, to, templateName string,
 	bodyParams []string,
 ) error {
-	if p.accessToken == "" {
-		return fmt.Errorf("META_GLOBAL_TOKEN is required")
-	}
+	accessToken = strings.TrimSpace(accessToken)
 	phoneNumberID = strings.TrimSpace(phoneNumberID)
 	to = strings.TrimSpace(to)
 	templateName = strings.TrimSpace(templateName)
+	if accessToken == "" {
+		return fmt.Errorf("access token is required")
+	}
 	if phoneNumberID == "" {
 		return fmt.Errorf("phone number id is required")
 	}
@@ -382,21 +444,19 @@ func (p *MetaProvider) SendUtilityTemplate(
 		return fmt.Errorf("marshal template payload: %w", err)
 	}
 
-	if _, err := p.doMetaRequest(ctx, http.MethodPost, p.messagesURL(phoneNumberID), bodyBytes); err != nil {
-		return err
-	}
-	return nil
+	_, err = p.doMetaRequest(ctx, accessToken, http.MethodPost, p.messagesURL(phoneNumberID), bodyBytes)
+	return err
 }
 
 func (p *MetaProvider) messagesURL(phoneNumberID string) string {
 	return fmt.Sprintf("%s/%s/%s/messages", graphAPIBaseURL, p.apiVersion, phoneNumberID)
 }
 
-func (p *MetaProvider) messageTemplatesURL() string {
-	return fmt.Sprintf("%s/%s/%s/message_templates", graphAPIBaseURL, p.apiVersion, p.wabaID)
+func (p *MetaProvider) messageTemplatesURL(wabaID string) string {
+	return fmt.Sprintf("%s/%s/%s/message_templates", graphAPIBaseURL, p.apiVersion, wabaID)
 }
 
-func (p *MetaProvider) doMetaRequest(ctx context.Context, method, url string, body []byte) ([]byte, error) {
+func (p *MetaProvider) doMetaRequest(ctx context.Context, accessToken, method, url string, body []byte) ([]byte, error) {
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
@@ -407,7 +467,7 @@ func (p *MetaProvider) doMetaRequest(ctx context.Context, method, url string, bo
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+p.accessToken)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}

@@ -11,8 +11,8 @@ import (
 
 // TextMessageSender envia mensagens de texto via WhatsApp Cloud API.
 type TextMessageSender interface {
-	SendTextMessage(ctx context.Context, phoneNumberID, to, body string) error
-	SendUtilityTemplate(ctx context.Context, phoneNumberID, to, templateName string, bodyParams []string) error
+	SendTextMessage(ctx context.Context, accessToken, phoneNumberID, to, body string) error
+	SendUtilityTemplate(ctx context.Context, accessToken, phoneNumberID, to, templateName string, bodyParams []string) error
 }
 
 const adminAlertTimeout = 30 * time.Second
@@ -30,9 +30,10 @@ func NotifyAdminSpamAlert(ctx context.Context, sender TextMessageSender, systemN
 		return
 	}
 
+	accessToken := strings.TrimSpace(os.Getenv("ADMIN_ALERT_ACCESS_TOKEN"))
 	phoneNumberID := strings.TrimSpace(os.Getenv("ADMIN_ALERT_PHONE_NUMBER_ID"))
-	if phoneNumberID == "" {
-		log.Printf("spam alert skipped: ADMIN_ALERT_PHONE_NUMBER_ID is not configured")
+	if accessToken == "" || phoneNumberID == "" {
+		log.Printf("spam alert skipped: ADMIN_ALERT_ACCESS_TOKEN and ADMIN_ALERT_PHONE_NUMBER_ID are required")
 		return
 	}
 
@@ -56,13 +57,13 @@ func NotifyAdminSpamAlert(ctx context.Context, sender TextMessageSender, systemN
 
 		var err error
 		if templateName != "" {
-			err = sender.SendUtilityTemplate(alertCtx, phoneNumberID, adminPhone, templateName, []string{
+			err = sender.SendUtilityTemplate(alertCtx, accessToken, phoneNumberID, adminPhone, templateName, []string{
 				systemName,
 				clientID,
 				fmt.Sprintf("%d", messageCount),
 			})
 		} else {
-			err = sender.SendTextMessage(alertCtx, phoneNumberID, adminPhone, body)
+			err = sender.SendTextMessage(alertCtx, accessToken, phoneNumberID, adminPhone, body)
 		}
 		if err != nil {
 			log.Printf("admin spam alert to %s failed: %v", adminPhone, err)

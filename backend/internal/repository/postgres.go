@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/whatsappgetway/gateway/internal/model"
@@ -12,6 +13,8 @@ import (
 
 var (
 	ErrSystemNotFound        = errors.New("system not found")
+	ErrSystemSlugNotFound    = errors.New("system slug not found")
+	ErrDuplicateSystemSlug   = errors.New("duplicate system slug")
 	ErrUserNotFound          = errors.New("user not found")
 	ErrClientChannelNotFound = errors.New("client channel not found")
 	ErrMessageLogNotFound    = errors.New("message log not found")
@@ -27,46 +30,30 @@ func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 
 func (r *PostgresRepository) FindSystemByAPIKeyHash(ctx context.Context, apiKeyHash string) (*model.System, error) {
 	const query = `
-		SELECT id, name, api_key_hash, webhook_url, created_at
+		SELECT id, name, slug, api_key_hash, webhook_url, created_at
 		FROM systems WHERE api_key_hash = $1
 	`
-	var system model.System
-	var webhookURL sql.NullString
-	err := r.db.QueryRowContext(ctx, query, apiKeyHash).Scan(
-		&system.ID, &system.Name, &system.APIKeyHash, &webhookURL, &system.CreatedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrSystemNotFound
+	return r.scanSystem(r.db.QueryRowContext(ctx, query, apiKeyHash))
+}
+
+func (r *PostgresRepository) FindSystemBySlug(ctx context.Context, slug string) (*model.System, error) {
+	const query = `
+		SELECT id, name, slug, api_key_hash, webhook_url, created_at
+		FROM systems WHERE slug = $1
+	`
+	system, err := r.scanSystem(r.db.QueryRowContext(ctx, query, slug))
+	if errors.Is(err, ErrSystemNotFound) {
+		return nil, ErrSystemSlugNotFound
 	}
-	if err != nil {
-		return nil, fmt.Errorf("query system by api key hash: %w", err)
-	}
-	if webhookURL.Valid {
-		system.WebhookURL = webhookURL.String
-	}
-	return &system, nil
+	return system, err
 }
 
 func (r *PostgresRepository) GetDefaultSystem(ctx context.Context) (*model.System, error) {
 	const query = `
-		SELECT id, name, api_key_hash, webhook_url, created_at
+		SELECT id, name, slug, api_key_hash, webhook_url, created_at
 		FROM systems ORDER BY created_at ASC LIMIT 1
 	`
-	var system model.System
-	var webhookURL sql.NullString
-	err := r.db.QueryRowContext(ctx, query).Scan(
-		&system.ID, &system.Name, &system.APIKeyHash, &webhookURL, &system.CreatedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrSystemNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("query default system: %w", err)
-	}
-	if webhookURL.Valid {
-		system.WebhookURL = webhookURL.String
-	}
-	return &system, nil
+	return r.scanSystem(r.db.QueryRowContext(ctx, query))
 }
 
 func (r *PostgresRepository) FindUserByEmail(ctx context.Context, email string) (*model.User, error) {
@@ -84,16 +71,123 @@ func (r *PostgresRepository) FindUserByEmail(ctx context.Context, email string) 
 
 func (r *PostgresRepository) CreateSystem(ctx context.Context, system *model.System) error {
 	const query = `
-		INSERT INTO systems (name, api_key_hash, webhook_url)
-		VALUES ($1, $2, $3) RETURNING id, created_at
+		INSERT INTO systems (name, slug, api_key_hash, webhook_url)
+		VALUES ($1, $2, $3, $4) RETURNING id, created_at
 	`
 	var webhookURL any
 	if system.WebhookURL != "" {
 		webhookURL = system.WebhookURL
 	}
-	err := r.db.QueryRowContext(ctx, query, system.Name, system.APIKeyHash, webhookURL).Scan(&system.ID, &system.CreatedAt)
+	err := r.db.QueryRowContext(ctx, query, system.Name, system.Slug, system.APIKeyHash, webhookURL).Scan(&system.ID, &system.CreatedAt)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrDuplicateSystemSlug
+		}
 		return fmt.Errorf("insert system: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) ListSystems(ctx context.Context) ([]model.System, error) {
+	const query = `
+		SELECT id, name, slug, api_key_hash, webhook_url, created_at
+		FROM systems ORDER BY created_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query systems: %w", err)
+	}
+	defer rows.Close()
+
+	systems := make([]model.System, 0)
+	for rows.Next() {
+		system, err := r.scanSystemRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		systems = append(systems, system)
+	}
+	return systems, rows.Err()
+}
+
+func (r *PostgresRepository) FindSystemByID(ctx context.Context, systemID string) (*model.System, error) {
+	const query = `
+		SELECT id, name, slug, api_key_hash, webhook_url, created_at
+		FROM systems WHERE id = $1
+	`
+	return r.scanSystem(r.db.QueryRowContext(ctx, query, systemID))
+}
+
+func (r *PostgresRepository) UpdateSystem(ctx context.Context, systemID, name, slug, webhookURL string) error {
+	const query = `
+		UPDATE systems
+		SET name = $2, slug = $3, webhook_url = NULLIF($4, '')
+		WHERE id = $1
+	`
+	result, err := r.db.ExecContext(ctx, query, systemID, name, slug, webhookURL)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrDuplicateSystemSlug
+		}
+		return fmt.Errorf("update system: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update system rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrSystemNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) DeleteSystem(ctx context.Context, systemID string) error {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM systems WHERE id = $1`, systemID)
+	if err != nil {
+		return fmt.Errorf("delete system: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete system rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrSystemNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) UpdateClientChannel(ctx context.Context, channel *model.ClientChannel) error {
+	const query = `
+		UPDATE client_channels
+		SET system_id = $2, salon_name = $3, external_client_id = $4,
+		    phone_number_id = $5, whatsapp_phone_number = $6
+		WHERE id = $1
+		RETURNING status, created_at
+	`
+	err := r.db.QueryRowContext(ctx, query,
+		channel.ID, channel.SystemID, channel.SalonName, channel.ExternalClientID,
+		channel.PhoneNumberID, channel.WhatsAppPhoneNumber,
+	).Scan(&channel.Status, &channel.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrClientChannelNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("update client channel: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) DeleteClientChannel(ctx context.Context, channelID string) error {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM client_channels WHERE id = $1`, channelID)
+	if err != nil {
+		return fmt.Errorf("delete client channel: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete client channel rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrClientChannelNotFound
 	}
 	return nil
 }
@@ -368,14 +462,23 @@ func (r *PostgresRepository) CreateMessageLog(ctx context.Context, log *model.Me
 	}
 	const query = `
 		INSERT INTO message_logs (
-			system_id, external_client_id, meta_message_id, appointment_id, phone_number,
-			template_name, sent_content, received_content, direction,
-			message_category, status, meta_cost
+			system_id, connection_id, sistema_origem, external_client_id, meta_message_id,
+			appointment_id, phone_number, template_name, sent_content, received_content,
+			direction, message_category, status, meta_cost
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id, created_at
 	`
-	var externalClientID, metaMessageID, messageCategory, templateName, sentContent, receivedContent any
+	var systemID, connectionID, sistemaOrigem, externalClientID, metaMessageID, messageCategory, templateName, sentContent, receivedContent any
+	if log.SystemID != "" {
+		systemID = log.SystemID
+	}
+	if log.ConnectionID != "" {
+		connectionID = log.ConnectionID
+	}
+	if log.SistemaOrigem != "" {
+		sistemaOrigem = log.SistemaOrigem
+	}
 	if log.ExternalClientID != "" {
 		externalClientID = log.ExternalClientID
 	}
@@ -396,9 +499,9 @@ func (r *PostgresRepository) CreateMessageLog(ctx context.Context, log *model.Me
 	}
 
 	err := r.db.QueryRowContext(ctx, query,
-		log.SystemID, externalClientID, metaMessageID, log.AppointmentID, log.PhoneNumber,
-		templateName, sentContent, receivedContent, string(log.Direction),
-		messageCategory, log.Status, log.MetaCost,
+		systemID, connectionID, sistemaOrigem, externalClientID, metaMessageID,
+		log.AppointmentID, log.PhoneNumber, templateName, sentContent, receivedContent,
+		string(log.Direction), messageCategory, log.Status, log.MetaCost,
 	).Scan(&log.ID, &log.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert message log: %w", err)
@@ -556,4 +659,41 @@ func (r *PostgresRepository) MarkMessageLogDelivered(
 		return ErrMessageLogNotFound
 	}
 	return nil
+}
+
+func (r *PostgresRepository) scanSystem(row *sql.Row) (*model.System, error) {
+	var system model.System
+	var webhookURL sql.NullString
+	err := row.Scan(
+		&system.ID, &system.Name, &system.Slug, &system.APIKeyHash, &webhookURL, &system.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrSystemNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan system: %w", err)
+	}
+	if webhookURL.Valid {
+		system.WebhookURL = webhookURL.String
+	}
+	return &system, nil
+}
+
+func (r *PostgresRepository) scanSystemRow(rows *sql.Rows) (model.System, error) {
+	var system model.System
+	var webhookURL sql.NullString
+	err := rows.Scan(
+		&system.ID, &system.Name, &system.Slug, &system.APIKeyHash, &webhookURL, &system.CreatedAt,
+	)
+	if err != nil {
+		return system, fmt.Errorf("scan system row: %w", err)
+	}
+	if webhookURL.Valid {
+		system.WebhookURL = webhookURL.String
+	}
+	return system, nil
+}
+
+func isUniqueViolation(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "23505"))
 }
