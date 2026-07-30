@@ -33,9 +33,15 @@ func (s *server) enforceConnectionSpamProtection(
 	w http.ResponseWriter,
 	r *http.Request,
 	conn *model.WhatsAppConnection,
+	audit outboundAttemptAudit,
 ) bool {
 	if conn.Status == model.ConnectionStatusSuspendedSpam ||
 		s.rateLimiter.IsBlacklisted(conn.SystemID, conn.TenantID) {
+		if err := s.persistRateLimitedOutbound(r.Context(), conn, audit); err != nil {
+			log.Printf("persist blocked outbound attempt for connection %s: %v", conn.ID, err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist rejected attempt"})
+			return false
+		}
 		writeJSON(w, http.StatusTooManyRequests, errorResponse{
 			Error: "tenant temporarily blocked due to spam protection",
 		})
@@ -45,6 +51,12 @@ func (s *server) enforceConnectionSpamProtection(
 	result := s.rateLimiter.RecordAttempt(conn.SystemID, conn.TenantID)
 	if result.Allowed {
 		return true
+	}
+
+	if err := s.persistRateLimitedOutbound(r.Context(), conn, audit); err != nil {
+		log.Printf("persist rate-limited outbound attempt for connection %s: %v", conn.ID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist rejected attempt"})
+		return false
 	}
 
 	if result.TriggerAlert {

@@ -13,19 +13,21 @@ import (
 	"time"
 
 	"github.com/whatsappgetway/gateway/internal/model"
-	"github.com/whatsappgetway/gateway/internal/provider"
 	"github.com/whatsappgetway/gateway/internal/repository"
 	"github.com/whatsappgetway/gateway/internal/security"
 )
 
 type outboundWebhookPayload struct {
-	SystemID         string `json:"system_id"`
-	ExternalClientID string `json:"external_client_id"`
-	MetaMessageID    string `json:"meta_message_id,omitempty"`
-	PhoneNumber      string `json:"phone_number"`
-	Text             string `json:"text"`
-	EventType        string `json:"event_type"`
-	Action           string `json:"action,omitempty"`
+	SystemID         string           `json:"system_id"`
+	ExternalClientID string           `json:"external_client_id"`
+	MetaMessageID    string           `json:"meta_message_id,omitempty"`
+	PhoneNumber      string           `json:"phone_number"`
+	Text             string           `json:"text"`
+	EventType        string           `json:"event_type"`
+	Action           string           `json:"action,omitempty"`
+	Media            *inboundMedia    `json:"media,omitempty"`
+	Location         *inboundLocation `json:"location,omitempty"`
+	Reaction         *inboundReaction `json:"reaction,omitempty"`
 }
 
 type metaMessageStatus struct {
@@ -38,26 +40,6 @@ type metaMessageStatus struct {
 		PricingModel string `json:"pricing_model"`
 		Category     string `json:"category"`
 	} `json:"pricing"`
-}
-
-type metaInboundMessage struct {
-	ID   string `json:"id"`
-	From string `json:"from"`
-	Type string `json:"type"`
-	Text *struct {
-		Body string `json:"body"`
-	} `json:"text"`
-	Button *struct {
-		Payload string `json:"payload"`
-		Text    string `json:"text"`
-	} `json:"button"`
-	Interactive *struct {
-		Type        string `json:"type"`
-		ButtonReply *struct {
-			ID    string `json:"id"`
-			Title string `json:"title"`
-		} `json:"button_reply"`
-	} `json:"interactive"`
 }
 
 func (s *server) handleMetaWebhookVerify(w http.ResponseWriter, r *http.Request) {
@@ -179,9 +161,12 @@ func (s *server) processLegacyMetaWebhookAsync(
 		s.processDeliveryStatusesFromPayload(ctx, conn, payload)
 	}
 
-	targetURL := strings.TrimSpace(channel.WebhookURL)
+	targetURL := ""
+	if conn != nil {
+		targetURL = strings.TrimSpace(conn.WebhookURL)
+	}
 	if targetURL == "" {
-		targetURL = strings.TrimSpace(os.Getenv("MOTHER_SYSTEM_WEBHOOK_URL"))
+		targetURL = strings.TrimSpace(channel.WebhookURL)
 	}
 
 	relay := inboundRelay{
@@ -192,15 +177,12 @@ func (s *server) processLegacyMetaWebhookAsync(
 		targetURL:        targetURL,
 		label:            "legacy " + channel.SystemID + "/" + channel.ExternalClientID,
 		buildPayload: func(event inboundEvent) any {
-			return outboundWebhookPayload{
+			payload := outboundWebhookPayload{
 				SystemID:         channel.SystemID,
 				ExternalClientID: channel.ExternalClientID,
-				MetaMessageID:    event.id,
-				PhoneNumber:      event.from,
-				Text:             event.text,
-				EventType:        event.eventType,
-				Action:           event.action,
 			}
+			applyInboundEventToLegacyPayload(&payload, event)
+			return payload
 		},
 	}
 
@@ -217,80 +199,6 @@ func parseMetaWebhookTimestamp(raw string) time.Time {
 		return time.Now().UTC()
 	}
 	return time.Unix(seconds, 0).UTC()
-}
-
-type inboundEvent struct {
-	id        string
-	from      string
-	text      string
-	eventType string
-	action    string
-}
-
-func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
-	from := strings.TrimSpace(message.From)
-	if from == "" {
-		return inboundEvent{}, false
-	}
-	messageID := strings.TrimSpace(message.ID)
-
-	switch message.Type {
-	case "text":
-		if message.Text == nil || strings.TrimSpace(message.Text.Body) == "" {
-			return inboundEvent{}, false
-		}
-		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      strings.TrimSpace(message.Text.Body),
-			eventType: "text_message",
-		}, true
-
-	case "button":
-		if message.Button == nil {
-			return inboundEvent{}, false
-		}
-		payload := strings.TrimSpace(message.Button.Payload)
-		if payload == "" {
-			payload = strings.TrimSpace(message.Button.Text)
-		}
-		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      payload,
-			eventType: "button_reply",
-			action:    mapButtonAction(payload),
-		}, true
-
-	case "interactive":
-		if message.Interactive == nil || message.Interactive.ButtonReply == nil {
-			return inboundEvent{}, false
-		}
-		payload := strings.TrimSpace(message.Interactive.ButtonReply.ID)
-		if payload == "" {
-			payload = strings.TrimSpace(message.Interactive.ButtonReply.Title)
-		}
-		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      payload,
-			eventType: "button_reply",
-			action:    mapButtonAction(payload),
-		}, true
-	}
-
-	return inboundEvent{}, false
-}
-
-func mapButtonAction(payload string) string {
-	switch payload {
-	case provider.ButtonPayloadConfirm:
-		return "CONFIRM"
-	case provider.ButtonPayloadReschedule:
-		return "CANCEL"
-	default:
-		return ""
-	}
 }
 
 func (s *server) createClientChannel(

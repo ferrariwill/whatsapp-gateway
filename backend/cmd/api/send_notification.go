@@ -85,6 +85,16 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if conn.Status == model.ConnectionStatusSuspendedSpam || s.rateLimiter.IsBlacklisted(conn.SystemID, conn.TenantID) {
+		if err := s.persistRateLimitedOutbound(r.Context(), conn, outboundAttemptAudit{
+			AppointmentID: req.AppointmentID,
+			PhoneNumber:   req.PhoneNumber,
+			TemplateName:  req.TemplateName,
+			Variables:     req.Variables,
+		}); err != nil {
+			log.Printf("persist blocked notification attempt %s/%s: %v", system.Slug, req.TenantID, err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist rejected attempt"})
+			return
+		}
 		writeJSON(w, http.StatusTooManyRequests, errorResponse{
 			Error: "tenant temporarily blocked due to spam protection",
 		})
@@ -106,6 +116,16 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 
 	result := s.rateLimiter.RecordAttempt(conn.SystemID, conn.TenantID)
 	if !result.Allowed {
+		if err := s.persistRateLimitedOutbound(r.Context(), conn, outboundAttemptAudit{
+			AppointmentID: req.AppointmentID,
+			PhoneNumber:   req.PhoneNumber,
+			TemplateName:  req.TemplateName,
+			Variables:     req.Variables,
+		}); err != nil {
+			log.Printf("persist rate-limited notification attempt %s/%s: %v", system.Slug, req.TenantID, err)
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to persist rejected attempt"})
+			return
+		}
 		if result.TriggerAlert {
 			if err := s.repo.SuspendConnectionForSpam(r.Context(), conn.ID); err != nil {
 				log.Printf("suspend connection for spam %s/%s: %v", system.Slug, req.TenantID, err)

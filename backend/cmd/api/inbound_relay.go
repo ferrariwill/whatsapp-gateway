@@ -12,17 +12,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/whatsappgetway/gateway/internal/model"
 	"github.com/whatsappgetway/gateway/internal/repository"
 )
 
-// relayBackoffDelays é a política de retry do repasse ao SaaS: primeira
+// relayBackoffDelays é a política de retry síncrono do repasse ao SaaS: primeira
 // tentativa imediata e três reentregas com espera crescente.
 var relayBackoffDelays = []time.Duration{0, 200 * time.Millisecond, 500 * time.Millisecond, time.Second}
 
@@ -43,6 +41,12 @@ type inboundRelay struct {
 // meta_message_id) descarta o evento sem repasse: é reentrega da Meta.
 func (s *server) relayInboundEvents(ctx context.Context, relay inboundRelay, events []inboundEvent) {
 	for _, event := range events {
+		payloadJSON, err := marshalInboundEventPayload(event)
+		if err != nil {
+			log.Printf("audit inbound %s: marshal payload: %v", relay.label, err)
+			continue
+		}
+
 		inboundLog := &model.MessageLog{
 			SystemID:         relay.systemID,
 			ConnectionID:     relay.connectionID,
@@ -52,9 +56,10 @@ func (s *server) relayInboundEvents(ctx context.Context, relay inboundRelay, eve
 			AppointmentID:    "-",
 			PhoneNumber:      event.from,
 			TemplateName:     event.eventType,
-			ReceivedContent:  event.text,
+			ReceivedContent:  event.displayText(),
 			Direction:        model.MessageDirectionInbound,
 			Status:           model.MessageStatusPending,
+			InboundPayload:   payloadJSON,
 		}
 
 		if err := s.repo.CreateMessageLog(ctx, inboundLog); err != nil {
@@ -66,15 +71,22 @@ func (s *server) relayInboundEvents(ctx context.Context, relay inboundRelay, eve
 			continue
 		}
 
+		if event.auditOnly {
+			log.Printf("inbound %s: unknown type=%q meta_message_id=%s audited, not relayed to SaaS",
+				relay.label, event.rawType, event.id)
+			s.markInboundPermanentFailure(ctx, inboundLog.ID, relay.label, failureReasonPermanent, "unknown inbound type "+event.rawType)
+			continue
+		}
+
 		if relay.targetURL == "" {
-			log.Printf("skip saas webhook: %s has no webhook_url", relay.label)
-			s.markInboundLog(ctx, inboundLog.ID, model.MessageStatusFailed, relay.label, "no webhook")
+			log.Printf("skip saas webhook: %s has no webhook_url (connection/system)", relay.label)
+			s.markInboundPermanentFailure(ctx, inboundLog.ID, relay.label, failureReasonNoWebhook, "no webhook_url on connection/system")
 			continue
 		}
 
 		if err := s.forwardWebhookWithRetry(ctx, relay.targetURL, relay.buildPayload(event)); err != nil {
 			log.Printf("forward webhook to %s for %s failed after retries: %v", relay.targetURL, relay.label, err)
-			s.markInboundLog(ctx, inboundLog.ID, model.MessageStatusFailed, relay.label, "relay exhausted")
+			s.markInboundRelayFailure(ctx, inboundLog.ID, relay.label, err, 1)
 			continue
 		}
 
@@ -94,6 +106,35 @@ func (s *server) markInboundLog(
 	}
 }
 
+func (s *server) markInboundPermanentFailure(ctx context.Context, logID, label, failureReason, lastError string) {
+	err := s.repo.UpdateMessageLogRelayFailure(ctx, logID, repository.RelayFailureUpdate{
+		Status:        model.MessageStatusFailed,
+		FailureReason: failureReason,
+		LastError:     lastError,
+		RelayAttempts: 1,
+	})
+	if err != nil {
+		log.Printf("mark inbound %s (%s) permanent failure: %v", logID, label, err)
+	}
+}
+
+func (s *server) markInboundRelayFailure(ctx context.Context, logID, label string, relayErr error, attempts int) {
+	reason := relayFailureReason(relayErr)
+	update := repository.RelayFailureUpdate{
+		Status:        model.MessageStatusFailed,
+		FailureReason: reason,
+		LastError:     relayErr.Error(),
+		RelayAttempts: attempts,
+	}
+	if reason == failureReasonTransient {
+		next := time.Now().UTC().Add(dlqBackoffWithJitter(attempts))
+		update.NextAttemptAt = &next
+	}
+	if err := s.repo.UpdateMessageLogRelayFailure(ctx, logID, update); err != nil {
+		log.Printf("mark inbound %s (%s) relay failure: %v", logID, label, err)
+	}
+}
+
 func (s *server) forwardWebhookWithRetry(ctx context.Context, targetURL string, payload any) error {
 	var lastErr error
 	for attempt, delay := range relayBackoffDelays {
@@ -105,7 +146,7 @@ func (s *server) forwardWebhookWithRetry(ctx context.Context, targetURL string, 
 				if lastErr != nil {
 					return lastErr
 				}
-				return ctx.Err()
+				return newRelayTransportError(ctx.Err())
 			case <-timer.C:
 			}
 		}
@@ -113,6 +154,10 @@ func (s *server) forwardWebhookWithRetry(ctx context.Context, targetURL string, 
 		lastErr = s.forwardWebhook(ctx, targetURL, payload)
 		if lastErr == nil {
 			return nil
+		}
+		if isPermanentRelayError(lastErr) {
+			log.Printf("saas webhook permanent failure to %s: %v", targetURL, lastErr)
+			return lastErr
 		}
 		log.Printf("saas webhook attempt %d/%d to %s failed: %v",
 			attempt+1, len(relayBackoffDelays), targetURL, lastErr)
@@ -123,24 +168,23 @@ func (s *server) forwardWebhookWithRetry(ctx context.Context, targetURL string, 
 func (s *server) forwardWebhook(ctx context.Context, targetURL string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return newRelayHTTPError(http.StatusBadRequest, err.Error())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return newRelayTransportError(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.metaClient.Do(req)
 	if err != nil {
-		return err
+		return newRelayTransportError(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		respBody, _ := io.ReadAll(resp.Body)
-		return errors.New(strings.TrimSpace(string(respBody)))
+		return newRelayHTTPError(resp.StatusCode, readRelayErrorBody(resp))
 	}
 	return nil
 }

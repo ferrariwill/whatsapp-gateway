@@ -31,10 +31,104 @@ type embeddedSignupConnectionPayload struct {
 	Status              string `json:"status"`
 }
 
+type mintEmbeddedSignupStateRequest struct {
+	TenantID      string `json:"tenant_id"`
+	SistemaOrigem string `json:"sistema_origem,omitempty"`
+	TTLSeconds    int    `json:"ttl_seconds,omitempty"`
+}
+
+type mintEmbeddedSignupStateResponse struct {
+	State     string    `json:"state"`
+	ExpiresAt time.Time `json:"expires_at"`
+	TenantID  string    `json:"tenant_id"`
+	Slug      string    `json:"slug"`
+}
+
+// oauthStateSecret resolve o segredo HMAC do state: OAUTH_STATE_SECRET, senão META_APP_SECRET.
+func oauthStateSecret() string {
+	if secret := strings.TrimSpace(os.Getenv("OAUTH_STATE_SECRET")); secret != "" {
+		return secret
+	}
+	return strings.TrimSpace(os.Getenv("META_APP_SECRET"))
+}
+
+// allowUnsignedEmbeddedSignupState habilita o state legado unsigned apenas com
+// flag explícita (desabilitada por padrão). Mesmo com a flag, o callback não
+// cria conexão nem troca identidade/token.
+func allowUnsignedEmbeddedSignupState() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("EMBEDDED_SIGNUP_ALLOW_UNSIGNED_STATE")))
+	return raw == "1" || raw == "true" || raw == "yes"
+}
+
+// handleMintEmbeddedSignupState emite e registra um state OAuth assinado
+// single-use para o tenant sob o system autenticado pela API Key.
+func (s *server) handleMintEmbeddedSignupState(w http.ResponseWriter, r *http.Request) {
+	system, ok := systemFromContext(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "system not found in context"})
+		return
+	}
+
+	var req mintEmbeddedSignupStateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid request body"})
+		return
+	}
+
+	req.TenantID = strings.TrimSpace(req.TenantID)
+	req.SistemaOrigem = strings.TrimSpace(strings.ToLower(req.SistemaOrigem))
+	if req.TenantID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "tenant_id is required"})
+		return
+	}
+	if req.SistemaOrigem != "" && req.SistemaOrigem != system.Slug {
+		writeJSON(w, http.StatusForbidden, errorResponse{
+			Error: fmt.Sprintf("sistema_origem %q does not match authenticated system %q", req.SistemaOrigem, system.Slug),
+		})
+		return
+	}
+
+	secret := oauthStateSecret()
+	if secret == "" {
+		log.Printf("embedded signup mint: OAUTH_STATE_SECRET/META_APP_SECRET missing")
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "oauth state secret not configured"})
+		return
+	}
+
+	ttl := 30 * time.Minute
+	if req.TTLSeconds > 0 {
+		ttl = time.Duration(req.TTLSeconds) * time.Second
+	}
+	if ttl > 2*time.Hour {
+		ttl = 2 * time.Hour
+	}
+
+	state, claims, err := security.SignEmbeddedSignupStateClaims(secret, system.Slug, req.TenantID, ttl)
+	if err != nil {
+		log.Printf("embedded signup mint sign %s/%s: %v", system.Slug, req.TenantID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to sign oauth state"})
+		return
+	}
+
+	if err := s.repo.RegisterOAuthStateNonce(r.Context(), system.ID, claims.TenantID, claims.NonceHash, claims.ExpiresAt); err != nil {
+		log.Printf("embedded signup mint register nonce %s/%s: %v", system.Slug, req.TenantID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to register oauth state nonce"})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, mintEmbeddedSignupStateResponse{
+		State:     state,
+		ExpiresAt: claims.ExpiresAt,
+		TenantID:  claims.TenantID,
+		Slug:      claims.Slug,
+	})
+}
+
 // handleEmbeddedSignupCallback recebe o redirect OAuth do Embedded Signup da Meta.
 // state aceito:
-//   - assinado: security.SignEmbeddedSignupState (recomendado)
-//   - legado: "{slug}_{tenant_id}" ou "{slug}::{tenant_id}" (tenant com "_" só via "::" ou assinado)
+//   - assinado: security.SignEmbeddedSignupState (obrigatório em produção)
+//   - legado unsigned: só com EMBEDDED_SIGNUP_ALLOW_UNSIGNED_STATE=true, e sem
+//     criar conexão nem trocar identidade/token
 func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Request) {
 	if errMsg := strings.TrimSpace(r.URL.Query().Get("error")); errMsg != "" {
 		reason := strings.TrimSpace(r.URL.Query().Get("error_description"))
@@ -66,11 +160,12 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	slug, tenantID, stateSigned, err := resolveEmbeddedSignupState(appSecret, state)
+	resolved, err := resolveEmbeddedSignupState(oauthStateSecret(), state)
 	if err != nil {
 		writeEmbeddedSignupResult(w, r, http.StatusBadRequest, false, err.Error(), "")
 		return
 	}
+	slug, tenantID, stateSigned := resolved.Slug, resolved.TenantID, resolved.Signed
 
 	system, err := s.repo.FindSystemBySlug(r.Context(), slug)
 	if errors.Is(err, repository.ErrSystemSlugNotFound) {
@@ -85,6 +180,21 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
+
+	// Consumo atômico do nonce ANTES da troca do code — rejeita replay,
+	// expiração, tenant/system divergente e corrida de dois callbacks.
+	if stateSigned {
+		if err := s.repo.ConsumeOAuthStateNonce(ctx, resolved.NonceHash, system.ID, tenantID); err != nil {
+			if errors.Is(err, repository.ErrOAuthStateNotFound) {
+				writeEmbeddedSignupResult(w, r, http.StatusBadRequest, false,
+					"state OAuth inválido, expirado ou já utilizado", "")
+				return
+			}
+			log.Printf("embedded signup consume nonce %s/%s: %v", slug, tenantID, err)
+			writeEmbeddedSignupResult(w, r, http.StatusInternalServerError, false, "erro ao validar state OAuth", "")
+			return
+		}
+	}
 
 	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 	accessToken, err := metaProvider.ExchangeOAuthCode(ctx, appID, appSecret, code, redirectURI)
@@ -107,17 +217,30 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 		writeEmbeddedSignupResult(w, r, http.StatusInternalServerError, false, "erro ao verificar conexão existente", "")
 		return
 	}
-	if existing != nil {
-		identityChange := existing.PhoneNumberID != assets.PhoneNumberID || existing.WabaID != assets.WabaID
-		if identityChange && !stateSigned {
-			log.Printf(
-				"embedded signup blocked identity takeover %s/%s: existing phone=%s waba=%s, incoming phone=%s waba=%s",
-				slug, tenantID, existing.PhoneNumberID, existing.WabaID, assets.PhoneNumberID, assets.WabaID,
-			)
-			writeEmbeddedSignupResult(w, r, http.StatusConflict, false,
-				"conexão já ativa com outro número WhatsApp; reconectar exige state OAuth assinado", "")
+
+	// State legado unsigned (só com flag): nunca cria e nunca troca identidade/token.
+	if !stateSigned {
+		if existing == nil {
+			log.Printf("embedded signup blocked unsigned create %s/%s", slug, tenantID)
+			writeEmbeddedSignupResult(w, r, http.StatusForbidden, false,
+				"state OAuth assinado obrigatório para criar conexão", "")
 			return
 		}
+		tokenChange := existing.AccessToken != assets.AccessToken
+		identityChange := existing.PhoneNumberID != assets.PhoneNumberID || existing.WabaID != assets.WabaID
+		if identityChange || tokenChange {
+			log.Printf(
+				"embedded signup blocked unsigned mutation %s/%s: identity_change=%v token_change=%v",
+				slug, tenantID, identityChange, tokenChange,
+			)
+			writeEmbeddedSignupResult(w, r, http.StatusForbidden, false,
+				"state OAuth assinado obrigatório para alterar conexão ou token", "")
+			return
+		}
+		// Sem mudanças: nada a persistir; ainda assim exige signed em produção.
+		writeEmbeddedSignupResult(w, r, http.StatusOK, true,
+			fmt.Sprintf("O tenant %s (%s) já está com o WhatsApp ativo", tenantID, system.Name), "")
+		return
 	}
 
 	webhookURL := strings.TrimSpace(system.WebhookURL)
@@ -153,17 +276,40 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 	writeEmbeddedSignupResult(w, r, http.StatusOK, true, fmt.Sprintf("O tenant %s (%s) agora está com o WhatsApp ativo", tenantID, system.Name), "")
 }
 
-// resolveEmbeddedSignupState prefere state HMAC assinado; fallback legado para compatibilidade.
-func resolveEmbeddedSignupState(appSecret, state string) (slug, tenantID string, signed bool, err error) {
-	slug, tenantID, signed, err = security.VerifyEmbeddedSignupState(appSecret, state)
+type resolvedEmbeddedSignupState struct {
+	Slug      string
+	TenantID  string
+	NonceHash string
+	Signed    bool
+}
+
+// resolveEmbeddedSignupState prefere state HMAC assinado. Fallback legado só
+// com EMBEDDED_SIGNUP_ALLOW_UNSIGNED_STATE (desabilitado por padrão).
+func resolveEmbeddedSignupState(secret, state string) (resolvedEmbeddedSignupState, error) {
+	claims, signed, err := security.ParseEmbeddedSignupState(secret, state)
 	if err != nil {
-		return "", "", false, err
+		return resolvedEmbeddedSignupState{}, err
 	}
 	if signed {
-		return slug, tenantID, true, nil
+		return resolvedEmbeddedSignupState{
+			Slug:      claims.Slug,
+			TenantID:  claims.TenantID,
+			NonceHash: claims.NonceHash,
+			Signed:    true,
+		}, nil
 	}
-	slug, tenantID, err = parseEmbeddedSignupState(state)
-	return slug, tenantID, false, err
+	if !allowUnsignedEmbeddedSignupState() {
+		return resolvedEmbeddedSignupState{}, errors.New("state OAuth assinado obrigatório")
+	}
+	slug, tenantID, err := parseEmbeddedSignupState(state)
+	if err != nil {
+		return resolvedEmbeddedSignupState{}, err
+	}
+	return resolvedEmbeddedSignupState{
+		Slug:     slug,
+		TenantID: tenantID,
+		Signed:   false,
+	}, nil
 }
 
 // parseEmbeddedSignupState extrai slug e tenant_id.
@@ -204,10 +350,7 @@ func saasWebhookURLForSistema(sistemaOrigem string) string {
 		return ""
 	}
 	envKey := strings.ToUpper(strings.ReplaceAll(sistemaOrigem, "-", "_")) + "_SAAS_WEBHOOK_URL"
-	if url := strings.TrimSpace(os.Getenv(envKey)); url != "" {
-		return url
-	}
-	return strings.TrimSpace(os.Getenv("MOTHER_SYSTEM_WEBHOOK_URL"))
+	return strings.TrimSpace(os.Getenv(envKey))
 }
 
 func (s *server) notifySaaSWhatsAppActive(ctx context.Context, conn *model.WhatsAppConnection) error {

@@ -137,3 +137,94 @@ func TestQALegacyMetaWebhookAcceptsValidSignatureAndRelays(t *testing.T) {
 		t.Errorf("sistema_origem = %q, want %q", row.SistemaOrigem, beleza.Slug)
 	}
 }
+
+func qaPostLegacyMetaWebhook(t *testing.T, srv *server, phoneNumberID, payload string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webhooks/meta/"+phoneNumberID,
+		strings.NewReader(payload),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", security.SignMetaPayload(qaMetaAppSecret(t), []byte(payload)))
+	req.SetPathValue("phone_number_id", phoneNumberID)
+	rec := httptest.NewRecorder()
+	srv.handleMetaWebhookEvent(rec, req)
+	return rec
+}
+
+func TestQALegacyMetaWebhookForwardsTypedMediaEvents(t *testing.T) {
+	requireQADB(t)
+
+	srv := newQAServer(t, newQAMetaStub(), 100)
+	receiver := newQASaaSReceiver(t)
+	system := createQASystem(t, "Legacy Media", "legacy_media", receiver.URL())
+	createQAClientChannel(t, system, "tenant-media", "phone-legacy-media")
+	createQAConnection(t, system, "tenant-media", "phone-legacy-media", "token", receiver.URL())
+
+	messages := []string{
+		`{"id":"wamid.LEGACY.IMG","from":"5511900000000","type":"image","image":{"id":"img-legacy","mime_type":"image/jpeg","caption":"foto"}}`,
+		`{"id":"wamid.LEGACY.AUDIO","from":"5511900000000","type":"audio","audio":{"id":"audio-legacy","mime_type":"audio/ogg","voice":true}}`,
+		`{"id":"wamid.LEGACY.DOC","from":"5511900000000","type":"document","document":{"id":"doc-legacy","filename":"arquivo.pdf"}}`,
+		`{"id":"wamid.LEGACY.LOC","from":"5511900000000","type":"location","location":{"latitude":-23.5,"longitude":-46.6,"name":"SP"}}`,
+		`{"id":"wamid.LEGACY.REACT","from":"5511900000000","type":"reaction","reaction":{"message_id":"wamid.ORIGINAL","emoji":"👍"}}`,
+	}
+	for _, message := range messages {
+		payload := `{"entry":[{"changes":[{"field":"messages","value":{"messages":[` + message + `]}}]}]}`
+		if rec := qaPostLegacyMetaWebhook(t, srv, "phone-legacy-media", payload); rec.Code != http.StatusOK {
+			t.Fatalf("legacy media status = %d (body=%s)", rec.Code, rec.Body.String())
+		}
+	}
+
+	qaWaitFor(t, 5*time.Second, "legacy typed media deliveries", func() bool {
+		return receiver.Hits() == len(messages)
+	})
+	got := receiver.Received()
+	if len(got) != len(messages) {
+		t.Fatalf("typed deliveries = %d, want %d", len(got), len(messages))
+	}
+	byID := make(map[string]saasWebhookPayload, len(got))
+	for _, payload := range got {
+		byID[payload.MetaMessageID] = payload
+	}
+	if payload := byID["wamid.LEGACY.IMG"]; payload.Media == nil || payload.Media.ID != "img-legacy" {
+		t.Fatalf("legacy image payload = %+v", payload)
+	}
+	if payload := byID["wamid.LEGACY.AUDIO"]; payload.Media == nil || payload.Media.ID != "audio-legacy" || !payload.Media.Voice {
+		t.Fatalf("legacy audio payload = %+v", payload)
+	}
+	if payload := byID["wamid.LEGACY.DOC"]; payload.Media == nil || payload.Media.Filename != "arquivo.pdf" {
+		t.Fatalf("legacy document payload = %+v", payload)
+	}
+	if payload := byID["wamid.LEGACY.LOC"]; payload.Location == nil || payload.Location.Name != "SP" {
+		t.Fatalf("legacy location payload = %+v", payload)
+	}
+	if payload := byID["wamid.LEGACY.REACT"]; payload.Reaction == nil || payload.Reaction.MessageID != "wamid.ORIGINAL" {
+		t.Fatalf("legacy reaction payload = %+v", payload)
+	}
+}
+
+func TestQALegacyMetaWebhookIgnoresSharedFallback(t *testing.T) {
+	requireQADB(t)
+
+	srv := newQAServer(t, newQAMetaStub(), 100)
+	fallback := newQASaaSReceiver(t)
+	t.Setenv("MOTHER_SYSTEM_WEBHOOK_URL", fallback.URL())
+	system := createQASystem(t, "Legacy Isolated", "legacy_isolated", "")
+	createQAClientChannel(t, system, "tenant-no-webhook", "phone-legacy-isolated")
+
+	payload := qaInboundTextPayloadWithID(
+		"phone-legacy-isolated", "5511900000000", "oi", "wamid.LEGACY.NO.FALLBACK",
+	)
+	if rec := qaPostLegacyMetaWebhook(t, srv, "phone-legacy-isolated", payload); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	qaWaitFor(t, 5*time.Second, "legacy missing webhook audit", func() bool {
+		logs := qaListMessageLogs(t)
+		return len(logs) == 1 && logs[0].Status == string(model.MessageStatusFailed)
+	})
+	if fallback.Hits() != 0 {
+		t.Fatalf("shared fallback received %d cross-tenant deliveries", fallback.Hits())
+	}
+}

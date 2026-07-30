@@ -729,9 +729,9 @@ func TestQAWebhookDuplicateInboundIsDeduped(t *testing.T) {
 	}
 }
 
-// TestQAWebhookDropsUnsupportedMessageTypes documenta que mensagens de mídia e
-// localização são descartadas sem log nem repasse.
-func TestQAWebhookDropsUnsupportedMessageTypes(t *testing.T) {
+// TestQAWebhookForwardsTypedMediaEvents garante image/audio/document/location/reaction
+// tipados: audit em message_logs + repasse com IDs/metadados preservados.
+func TestQAWebhookForwardsTypedMediaEvents(t *testing.T) {
 	requireQADB(t)
 
 	stub := newQAMetaStub()
@@ -741,39 +741,124 @@ func TestQAWebhookDropsUnsupportedMessageTypes(t *testing.T) {
 	receiver := newQASaaSReceiver(t)
 	createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", receiver.URL())
 
-	payloads := map[string]string{
-		"image":    `{"from":"5511977776666","type":"image","image":{"id":"media-1","mime_type":"image/jpeg"}}`,
-		"audio":    `{"from":"5511977776666","type":"audio","audio":{"id":"media-2"}}`,
-		"document": `{"from":"5511977776666","type":"document","document":{"id":"media-3"}}`,
-		"location": `{"from":"5511977776666","type":"location","location":{"latitude":-23.5,"longitude":-46.6}}`,
-		"reaction": `{"from":"5511977776666","type":"reaction","reaction":{"emoji":"👍"}}`,
+	payloads := []struct {
+		name      string
+		messageID string
+		message   string
+		eventType string
+		check     func(t *testing.T, p saasWebhookPayload)
+	}{
+		{
+			name: "image", messageID: "wamid.QA.MEDIA.IMG", eventType: "image_message",
+			message: `{"id":"wamid.QA.MEDIA.IMG","from":"5511977776666","type":"image","image":{"id":"media-1","mime_type":"image/jpeg","caption":"foto"}}`,
+			check: func(t *testing.T, p saasWebhookPayload) {
+				if p.Media == nil || p.Media.ID != "media-1" || p.Media.MimeType != "image/jpeg" {
+					t.Fatalf("image media = %+v", p.Media)
+				}
+			},
+		},
+		{
+			name: "audio", messageID: "wamid.QA.MEDIA.AUD", eventType: "audio_message",
+			message: `{"id":"wamid.QA.MEDIA.AUD","from":"5511977776666","type":"audio","audio":{"id":"media-2","mime_type":"audio/ogg"}}`,
+			check: func(t *testing.T, p saasWebhookPayload) {
+				if p.Media == nil || p.Media.ID != "media-2" {
+					t.Fatalf("audio media = %+v", p.Media)
+				}
+			},
+		},
+		{
+			name: "document", messageID: "wamid.QA.MEDIA.DOC", eventType: "document_message",
+			message: `{"id":"wamid.QA.MEDIA.DOC","from":"5511977776666","type":"document","document":{"id":"media-3","filename":"x.pdf"}}`,
+			check: func(t *testing.T, p saasWebhookPayload) {
+				if p.Media == nil || p.Media.ID != "media-3" || p.Media.Filename != "x.pdf" {
+					t.Fatalf("document media = %+v", p.Media)
+				}
+			},
+		},
+		{
+			name: "location", messageID: "wamid.QA.MEDIA.LOC", eventType: "location_message",
+			message: `{"id":"wamid.QA.MEDIA.LOC","from":"5511977776666","type":"location","location":{"latitude":-23.5,"longitude":-46.6,"name":"SP"}}`,
+			check: func(t *testing.T, p saasWebhookPayload) {
+				if p.Location == nil || p.Location.Latitude != -23.5 || p.Location.Name != "SP" {
+					t.Fatalf("location = %+v", p.Location)
+				}
+			},
+		},
+		{
+			name: "reaction", messageID: "wamid.QA.MEDIA.REA", eventType: "reaction_message",
+			message: `{"id":"wamid.QA.MEDIA.REA","from":"5511977776666","type":"reaction","reaction":{"message_id":"wamid.ORIG","emoji":"👍"}}`,
+			check: func(t *testing.T, p saasWebhookPayload) {
+				if p.Reaction == nil || p.Reaction.Emoji != "👍" || p.Reaction.MessageID != "wamid.ORIG" {
+					t.Fatalf("reaction = %+v", p.Reaction)
+				}
+			},
+		},
 	}
 
-	for name, message := range payloads {
-		body := fmt.Sprintf(`{"entry":[{"changes":[{"field":"messages","value":{"metadata":{"phone_number_id":"phone-beleza"},"messages":[%s]}}]}]}`, message)
+	for _, tc := range payloads {
+		body := fmt.Sprintf(`{"entry":[{"changes":[{"field":"messages","value":{"metadata":{"phone_number_id":"phone-beleza"},"messages":[%s]}}]}]}`, tc.message)
 		if rec := qaPostMetaWebhook(t, srv, body); rec.Code != http.StatusOK {
-			t.Fatalf("%s: status = %d", name, rec.Code)
+			t.Fatalf("%s: status = %d", tc.name, rec.Code)
 		}
 	}
 
-	time.Sleep(700 * time.Millisecond)
+	qaWaitFor(t, 5*time.Second, "typed media deliveries", func() bool {
+		return len(receiver.Received()) >= len(payloads) && qaCountMessageLogs(t) >= len(payloads)
+	})
 
-	if hits := receiver.Hits(); hits != 0 {
-		t.Fatalf("behaviour changed: %d media/location events were forwarded to the SaaS — update the QA report", hits)
+	byID := map[string]saasWebhookPayload{}
+	for _, p := range receiver.Received() {
+		byID[p.MetaMessageID] = p
 	}
-	if count := qaCountMessageLogs(t); count != 0 {
-		t.Fatalf("behaviour changed: %d media/location events were logged — update the QA report", count)
+	for _, tc := range payloads {
+		got, ok := byID[tc.messageID]
+		if !ok {
+			t.Fatalf("%s: missing SaaS delivery", tc.name)
+		}
+		if got.EventType != tc.eventType {
+			t.Errorf("%s: event_type = %q, want %q", tc.name, got.EventType, tc.eventType)
+		}
+		tc.check(t, got)
 	}
-	t.Logf(
-		"finding: %d inbound event types (image, audio, document, location, reaction) were silently dropped — no message_logs row and no SaaS callback",
-		len(payloads),
-	)
+	if count := qaCountMessageLogs(t); count != len(payloads) {
+		t.Fatalf("message_logs = %d, want %d", count, len(payloads))
+	}
 }
 
-// TestQAWebhookAcceptsForgedUnsignedPayload documenta que o webhook não valida
-// X-Hub-Signature-256: qualquer requisição que conheça um phone_number_id
-// injeta eventos falsos no SaaS do tenant.
-func TestQAWebhookAcceptsForgedUnsignedPayload(t *testing.T) {
+// TestQAWebhookUnknownTypeIsAuditedNotSilent garante que tipo desconhecido
+// gera linha de auditoria (nunca drop silencioso).
+func TestQAWebhookUnknownTypeIsAuditedNotSilent(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srv := newQAServer(t, stub, 100)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	receiver := newQASaaSReceiver(t)
+	createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", receiver.URL())
+
+	body := `{"entry":[{"changes":[{"field":"messages","value":{"metadata":{"phone_number_id":"phone-beleza"},"messages":[{"id":"wamid.QA.UNK.1","from":"5511977776666","type":"sticker","sticker":{"id":"stk-1"}}]}}]}]}`
+	if rec := qaPostMetaWebhook(t, srv, body); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+
+	qaWaitFor(t, 5*time.Second, "unknown audited", func() bool {
+		return qaCountMessageLogs(t) >= 1
+	})
+	time.Sleep(200 * time.Millisecond)
+	if hits := receiver.Hits(); hits != 0 {
+		t.Fatalf("unknown type must not relay to SaaS, got %d hits", hits)
+	}
+	logs := qaListMessageLogs(t)
+	if len(logs) != 1 || logs[0].TemplateName != "unknown_message" {
+		t.Fatalf("expected audited unknown_message log, got %+v", logs)
+	}
+	if reason := qaMessageLogFailureReason(t, logs[0].ID); reason != "permanent" {
+		t.Errorf("failure_reason = %q, want permanent", reason)
+	}
+}
+
+// TestQAWebhookRejectsForgedUnsignedPayload garante rejeição por assinatura Meta.
+func TestQAWebhookRejectsForgedUnsignedPayload(t *testing.T) {
 	requireQADB(t)
 
 	stub := newQAMetaStub()
@@ -791,25 +876,18 @@ func TestQAWebhookAcceptsForgedUnsignedPayload(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.handleWhatsAppWebhookEvent(rec, req)
 
-	if rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
-		t.Logf("behaviour changed: forged payload rejected with %d — signature verification was implemented, update the QA report", rec.Code)
-		return
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("forged payload status = %d, want 401", rec.Code)
 	}
-
-	qaWaitFor(t, 5*time.Second, "forged event forwarded to the SaaS", func() bool {
-		return len(receiver.Received()) == 1
-	})
-
-	forwarded := receiver.Received()[0]
-	t.Logf(
-		"finding: payload with an invalid X-Hub-Signature-256 was accepted (HTTP %d) and relayed to the tenant SaaS as tenant_id=%q action=%q from=%q — no Meta signature verification",
-		rec.Code, forwarded.TenantID, forwarded.Action, forwarded.PhoneNumber,
-	)
+	time.Sleep(200 * time.Millisecond)
+	if hits := receiver.Hits(); hits != 0 {
+		t.Fatalf("forged payload must not reach SaaS, got %d", hits)
+	}
 }
 
-// TestQAWebhookFallsBackToMotherWebhookURL fixa o fallback global: conexão sem
-// webhook_url manda o evento do tenant para MOTHER_SYSTEM_WEBHOOK_URL.
-func TestQAWebhookFallsBackToMotherWebhookURL(t *testing.T) {
+// TestQAWebhookFailsWithoutTenantWebhook removes the shared MOTHER fallback:
+// missing connection/system webhook fails permanently without cross-tenant POST.
+func TestQAWebhookFailsWithoutTenantWebhook(t *testing.T) {
 	requireQADB(t)
 
 	stub := newQAMetaStub()
@@ -825,16 +903,11 @@ func TestQAWebhookFallsBackToMotherWebhookURL(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 
-	qaWaitFor(t, 5*time.Second, "fallback delivery", func() bool {
-		return len(fallback.Received()) == 1
+	qaWaitFor(t, 5*time.Second, "failed log without webhook", func() bool {
+		logs := qaListMessageLogs(t)
+		return len(logs) == 1 && logs[0].Status == string(model.MessageStatusFailed)
 	})
-
-	forwarded := fallback.Received()[0]
-	if forwarded.TenantID != "salao-sem-webhook" || forwarded.SystemID != beleza.ID {
-		t.Errorf("fallback payload lost tenant identity: %+v", forwarded)
+	if hits := fallback.Hits(); hits != 0 {
+		t.Fatalf("MOTHER fallback must not receive posts, got %d", hits)
 	}
-	t.Logf(
-		"note: tenant %q has no webhook_url, so its inbound events go to the shared MOTHER_SYSTEM_WEBHOOK_URL — every tenant in this situation shares one destination",
-		forwarded.TenantID,
-	)
 }

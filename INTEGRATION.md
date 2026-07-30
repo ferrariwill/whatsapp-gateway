@@ -29,7 +29,6 @@ Credenciais da Meta ficam **apenas no servidor**, nunca no painel por cliente:
 | `META_GLOBAL_TOKEN` | System User Permanent Access Token (conta corporativa WABA) |
 | `META_WABA_ID` | WhatsApp Business Account ID (criação/listagem de templates) |
 | `META_WEBHOOK_VERIFY_TOKEN` | Token de verificação do webhook Meta |
-| `MOTHER_SYSTEM_WEBHOOK_URL` | URL de fallback para repassar respostas inbound (se `systems.webhook_url` estiver vazio) |
 | `MONTHLY_MESSAGE_LIMIT` | Limite mensal de disparos por cliente externo (default: `3000`) |
 | `JWT_SECRET` | Sessão do painel administrativo |
 | `DATABASE_URL` | PostgreSQL (Supabase ou local) |
@@ -182,7 +181,7 @@ Quando o usuário toca em um botão ou envia texto, a Meta notifica o Gateway em
 GET|POST /webhooks/meta/{phone_number_id}
 ```
 
-O Gateway identifica a **aplicação** e o **cliente externo** pelo `phone_number_id` do chip e repassa o evento para a `webhook_url` da aplicação (ou `MOTHER_SYSTEM_WEBHOOK_URL`).
+O Gateway identifica a **aplicação** e o **cliente externo** pelo `phone_number_id` do chip e repassa o evento somente para a `webhook_url` da conexão ou da aplicação. Sem destino configurado, a entrega falha explicitamente.
 
 ### Arquitetura
 
@@ -258,7 +257,7 @@ O corpo do replay traz `"replay": true`, a chave idempotente `meta_message_id`
 (a mesma do repasse em tempo real) e as duas chaves de identidade do tenant
 (`tenant_id` e `external_client_id`), porque a linha não guarda por qual
 endpoint o evento entrou. A resolução de destino é a mesma do tempo real:
-webhook da conexão → webhook do system → `MOTHER_SYSTEM_WEBHOOK_URL`.
+webhook da conexão → webhook do system. Não há fallback compartilhado entre tenants.
 
 ```json
 {

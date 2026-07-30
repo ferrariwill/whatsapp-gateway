@@ -253,7 +253,7 @@ func TestQAPendingSweepReclaimsOrphanedClaim(t *testing.T) {
 		t.Fatalf("plant orphan claim: %v", err)
 	}
 
-	result, err := srv.sweepPendingInboundWithClaimTTL(context.Background(), time.Minute, time.Minute, 100)
+	result, err := srv.sweepPendingInboundWithClaimTTL(context.Background(), time.Minute, time.Minute, 100, defaultDLQMaxAttempts)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -268,10 +268,10 @@ func TestQAPendingSweepReclaimsOrphanedClaim(t *testing.T) {
 	}
 }
 
-// TestQAPendingSweepUsesMotherWebhookFallback cobre o buraco: o caminho em
-// tempo real cai em MOTHER_SYSTEM_WEBHOOK_URL quando conexão e system não têm
-// webhook_url; o sweep antigo marcava failed. Agora o mesmo destino é usado.
-func TestQAPendingSweepUsesMotherWebhookFallback(t *testing.T) {
+// TestQAPendingSweepFailsWithoutTenantWebhook covers the removal of the shared
+// MOTHER_SYSTEM_WEBHOOK_URL fallback: connection+system without webhook_url
+// must fail permanently (no cross-tenant destination).
+func TestQAPendingSweepFailsWithoutTenantWebhook(t *testing.T) {
 	requireQADB(t)
 
 	stub := newQAMetaStub()
@@ -281,7 +281,6 @@ func TestQAPendingSweepUsesMotherWebhookFallback(t *testing.T) {
 	t.Setenv("MOTHER_SYSTEM_WEBHOOK_URL", fallback.URL())
 
 	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
-	// Conexão e system sem webhook_url — só o fallback global resolve o destino.
 	conn := createQAConnection(t, beleza, "salao-sem-webhook", "phone-beleza", "token-beleza", "")
 
 	logID := qaInsertPendingInbound(t, beleza.ID, conn.ID, beleza.Slug, "salao-sem-webhook",
@@ -292,22 +291,17 @@ func TestQAPendingSweepUsesMotherWebhookFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep pending inbound: %v", err)
 	}
-	if result.Relayed != 1 {
-		t.Fatalf("relayed = %d, want 1 via MOTHER_SYSTEM_WEBHOOK_URL", result.Relayed)
+	if result.Failed != 1 || result.Relayed != 0 {
+		t.Fatalf("failed=%d relayed=%d, want failed=1 relayed=0 (no MOTHER fallback)", result.Failed, result.Relayed)
 	}
-	if got := qaMessageLogStatus(t, logID); got != string(model.MessageStatusSent) {
-		t.Errorf("status = %q, want sent", got)
+	if got := qaMessageLogStatus(t, logID); got != string(model.MessageStatusFailed) {
+		t.Errorf("status = %q, want failed", got)
 	}
-
-	received := fallback.Received()
-	if len(received) != 1 {
-		t.Fatalf("fallback recebeu %d repasses, want 1", len(received))
+	if hits := fallback.Hits(); hits != 0 {
+		t.Fatalf("MOTHER fallback received %d posts — shared destination must not be used", hits)
 	}
-	if received[0].MetaMessageID != "wamid.QA.PENDING.MOTHER" {
-		t.Errorf("meta_message_id = %q", received[0].MetaMessageID)
-	}
-	if !received[0].Replay {
-		t.Error("replay=true esperado no fallback do sweep")
+	if reason := qaMessageLogFailureReason(t, logID); reason != "permanent" {
+		t.Errorf("failure_reason = %q, want permanent", reason)
 	}
 }
 
@@ -319,11 +313,11 @@ func TestQAInboundRelayCarriesMetaMessageIDInBothFormats(t *testing.T) {
 	stub := newQAMetaStub()
 	srv := newQAServer(t, stub, 100)
 
-	unifiedRecv := newQASaaSReceiver(t)
-	legacyRecv := newQASaaSReceiver(t)
+	receiver := newQASaaSReceiver(t)
 
-	beleza := createQASystem(t, "Beleza Web", "beleza_web", legacyRecv.URL())
-	createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", unifiedRecv.URL())
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", receiver.URL())
+	// Conexão sem webhook próprio: unificado e legado resolvem para systems.webhook_url.
+	createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", "")
 	createQAClientChannel(t, beleza, "salao-1", "phone-beleza")
 
 	const unifiedID = "wamid.QA.KEY.UNIFIED"
@@ -333,9 +327,9 @@ func TestQAInboundRelayCarriesMetaMessageIDInBothFormats(t *testing.T) {
 		t.Fatalf("unified status = %d", rec.Code)
 	}
 	qaWaitFor(t, 5*time.Second, "unified delivery", func() bool {
-		return len(unifiedRecv.Received()) >= 1
+		return len(receiver.Received()) >= 1
 	})
-	if got := unifiedRecv.Received()[0].MetaMessageID; got != unifiedID {
+	if got := receiver.Received()[0].MetaMessageID; got != unifiedID {
 		t.Errorf("unified meta_message_id = %q, want %q", got, unifiedID)
 	}
 
@@ -350,12 +344,17 @@ func TestQAInboundRelayCarriesMetaMessageIDInBothFormats(t *testing.T) {
 		t.Fatalf("legacy status = %d", rec.Code)
 	}
 	qaWaitFor(t, 5*time.Second, "legacy delivery", func() bool {
-		return legacyRecv.Hits() >= 1
+		return receiver.Hits() >= 2
 	})
-	// O receptor decodifica no formato unificado; meta_message_id é o mesmo
-	// campo JSON nos dois contratos.
-	if got := legacyRecv.Received()[0].MetaMessageID; got != legacyID {
-		t.Errorf("legacy meta_message_id = %q, want %q", got, legacyID)
+	foundLegacy := false
+	for _, got := range receiver.Received() {
+		if got.MetaMessageID == legacyID {
+			foundLegacy = true
+			break
+		}
+	}
+	if !foundLegacy {
+		t.Errorf("legacy meta_message_id %q not found in %+v", legacyID, receiver.Received())
 	}
 
 	// Replay do sweep deve carregar a mesma chave.
@@ -584,5 +583,163 @@ func TestQALegacyMetaWebhookRejectionLogIsSampled(t *testing.T) {
 
 	if lines := strings.Count(captured.String(), "invalid or missing X-Hub-Signature-256"); lines > 1 {
 		t.Errorf("linhas de log = %d para 50 rejeições, want no máximo 1 por intervalo", lines)
+	}
+}
+
+// TestQAFailedInboundDLQRetriesTransientThenSucceeds reprocessa failed transitório
+// após next_attempt_at, preservando meta_message_id e sem POST duplicado.
+func TestQAFailedInboundDLQRetriesTransientThenSucceeds(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srv := newQAServer(t, stub, 100)
+
+	receiver := newQASaaSReceiver(t)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	conn := createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", receiver.URL())
+
+	logID := qaInsertPendingInbound(t, beleza.ID, conn.ID, beleza.Slug, "salao-1",
+		"wamid.QA.DLQ.1", "5511900000000", "text_message", "retry-me",
+		time.Now().UTC().Add(-time.Hour))
+
+	_, err := qaDB.Exec(`
+		UPDATE message_logs
+		SET status = 'failed',
+		    failure_reason = 'transient',
+		    relay_attempts = 1,
+		    next_attempt_at = NOW() - INTERVAL '1 second',
+		    inbound_payload = $2::jsonb
+		WHERE id = $1
+	`, logID, `{"id":"wamid.QA.DLQ.1","from":"5511900000000","text":"retry-me","event_type":"text_message"}`)
+	if err != nil {
+		t.Fatalf("plant failed row: %v", err)
+	}
+
+	result, err := srv.sweepPendingInbound(context.Background(), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.Claimed != 1 || result.Relayed != 1 {
+		t.Fatalf("claimed=%d relayed=%d, want 1/1", result.Claimed, result.Relayed)
+	}
+	if got := qaMessageLogStatus(t, logID); got != string(model.MessageStatusSent) {
+		t.Errorf("status = %q, want sent", got)
+	}
+	received := receiver.Received()
+	if len(received) != 1 || received[0].MetaMessageID != "wamid.QA.DLQ.1" || !received[0].Replay {
+		t.Fatalf("unexpected delivery: %+v", received)
+	}
+}
+
+// TestQAFailedInboundDLQSkipsPermanentAndFutureAttempt cobre classificação permanente
+// e next_attempt_at no futuro.
+func TestQAFailedInboundDLQSkipsPermanentAndFutureAttempt(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srv := newQAServer(t, stub, 100)
+	receiver := newQASaaSReceiver(t)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	conn := createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", receiver.URL())
+
+	permanentID := qaInsertPendingInbound(t, beleza.ID, conn.ID, beleza.Slug, "salao-1",
+		"wamid.QA.DLQ.PERM", "5511900000000", "text_message", "nope",
+		time.Now().UTC().Add(-time.Hour))
+	futureID := qaInsertPendingInbound(t, beleza.ID, conn.ID, beleza.Slug, "salao-1",
+		"wamid.QA.DLQ.FUT", "5511900000001", "text_message", "later",
+		time.Now().UTC().Add(-time.Hour))
+
+	_, err := qaDB.Exec(`UPDATE message_logs SET status='failed', failure_reason='permanent', relay_attempts=1 WHERE id=$1`, permanentID)
+	if err != nil {
+		t.Fatalf("plant permanent: %v", err)
+	}
+	_, err = qaDB.Exec(`
+		UPDATE message_logs
+		SET status='failed', failure_reason='transient', relay_attempts=1,
+		    next_attempt_at = NOW() + INTERVAL '1 hour'
+		WHERE id=$1
+	`, futureID)
+	if err != nil {
+		t.Fatalf("plant future: %v", err)
+	}
+
+	result, err := srv.sweepPendingInbound(context.Background(), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.Claimed != 0 {
+		t.Fatalf("claimed=%d, want 0", result.Claimed)
+	}
+	if hits := receiver.Hits(); hits != 0 {
+		t.Fatalf("SaaS hits=%d, want 0", hits)
+	}
+}
+
+// TestQAFailedInboundDLQPermanentHTTPDoesNotReschedule marca 400 como permanente.
+func TestQAFailedInboundDLQPermanentHTTPDoesNotReschedule(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srv := newQAServer(t, stub, 100)
+	receiver := newQASaaSReceiver(t)
+	receiver.status.Store(http.StatusBadRequest)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	conn := createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", receiver.URL())
+
+	logID := qaInsertPendingInbound(t, beleza.ID, conn.ID, beleza.Slug, "salao-1",
+		"wamid.QA.DLQ.400", "5511900000000", "text_message", "bad",
+		time.Now().UTC().Add(-time.Hour))
+
+	result, err := srv.sweepPendingInbound(context.Background(), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Fatalf("failed=%d, want 1", result.Failed)
+	}
+	if reason := qaMessageLogFailureReason(t, logID); reason != "permanent" {
+		t.Errorf("failure_reason=%q, want permanent", reason)
+	}
+
+	// Segunda passagem não reclaima permanente.
+	result2, err := srv.sweepPendingInbound(context.Background(), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if result2.Claimed != 0 {
+		t.Fatalf("permanent reclaimed: claimed=%d", result2.Claimed)
+	}
+}
+
+// TestQAPendingSweepReplayPreservesMediaPayload restaura media de inbound_payload.
+func TestQAPendingSweepReplayPreservesMediaPayload(t *testing.T) {
+	requireQADB(t)
+
+	stub := newQAMetaStub()
+	srv := newQAServer(t, stub, 100)
+	receiver := newQASaaSReceiver(t)
+	beleza := createQASystem(t, "Beleza Web", "beleza_web", "")
+	conn := createQAConnection(t, beleza, "salao-1", "phone-beleza", "token-beleza", receiver.URL())
+
+	logID := qaInsertPendingInbound(t, beleza.ID, conn.ID, beleza.Slug, "salao-1",
+		"wamid.QA.DLQ.IMG", "5511900000000", "image_message", "legenda",
+		time.Now().UTC().Add(-time.Hour))
+	_, err := qaDB.Exec(`
+		UPDATE message_logs SET inbound_payload = $2::jsonb WHERE id = $1
+	`, logID, `{"id":"wamid.QA.DLQ.IMG","from":"5511900000000","text":"legenda","event_type":"image_message","media":{"id":"media-replay","mime_type":"image/png"}}`)
+	if err != nil {
+		t.Fatalf("set payload: %v", err)
+	}
+
+	result, err := srv.sweepPendingInbound(context.Background(), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.Relayed != 1 {
+		t.Fatalf("relayed=%d, want 1", result.Relayed)
+	}
+	got := receiver.Received()[0]
+	if got.Media == nil || got.Media.ID != "media-replay" || got.EventType != "image_message" {
+		t.Fatalf("replay lost media: %+v", got)
 	}
 }
