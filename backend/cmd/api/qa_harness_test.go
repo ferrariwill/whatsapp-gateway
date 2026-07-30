@@ -259,21 +259,62 @@ func (s *qaMetaStub) CallCount() int {
 
 func newQAServer(t *testing.T, stub *qaMetaStub, maxMessagesPerMinute int) *server {
 	t.Helper()
+	return newQAServerWithRelay(t, stub, maxMessagesPerMinute, relayPoolConfig{
+		Workers:       32,
+		QueueSize:     512,
+		SubmitTimeout: 2 * time.Second,
+		TaskTimeout:   45 * time.Second,
+	})
+}
+
+// newQAServerWithRelay monta o servidor com um pool de repasse próprio, drenado
+// no fim do teste — os testes exercitam o mesmo caminho de admissão da produção.
+func newQAServerWithRelay(
+	t *testing.T,
+	stub *qaMetaStub,
+	maxMessagesPerMinute int,
+	relayCfg relayPoolConfig,
+) *server {
+	t.Helper()
 	t.Setenv("ADMIN_PHONE_NUMBER", "")
 	t.Setenv("MOTHER_SYSTEM_WEBHOOK_URL", "")
 	if strings.TrimSpace(os.Getenv("META_APP_SECRET")) == "" {
 		t.Setenv("META_APP_SECRET", "qa-app-secret")
 	}
 
+	pool := newRelayPool(relayCfg)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := pool.Shutdown(ctx); err != nil {
+			t.Logf("drain relay pool: %v", err)
+		}
+	})
+
 	repo := repository.NewPostgresRepository(qaDB)
 	return &server{
-		repo:        repo,
-		jwtSecret:   []byte("qa-jwt-secret-with-at-least-32-chars!!"),
-		metaClient:  &http.Client{Transport: stub, Timeout: 10 * time.Second},
-		metaAPIVer:  "v21.0",
-		usage:       service.NewUsageService(repo),
-		rateLimiter: security.NewRateLimiter(maxMessagesPerMinute, 15*time.Minute),
+		repo:         repo,
+		jwtSecret:    []byte("qa-jwt-secret-with-at-least-32-chars!!"),
+		metaClient:   &http.Client{Transport: stub, Timeout: 10 * time.Second},
+		metaAPIVer:   "v21.0",
+		usage:        service.NewUsageService(repo),
+		rateLimiter:  security.NewRateLimiter(maxMessagesPerMinute, 15*time.Minute),
+		relay:        pool,
+		rejectionLog: newLogSampler(defaultRejectionLogInterval),
 	}
+}
+
+// qaMetaAppSecret devolve o segredo que o harness realmente injetou. Fixar
+// "qa-app-secret" no teste dava vermelho falso em máquina/CI com META_APP_SECRET
+// real exportado: o harness preserva o valor do ambiente e o handler devolveria
+// 401 por MAC divergente.
+func qaMetaAppSecret(t *testing.T) string {
+	t.Helper()
+	secret := strings.TrimSpace(os.Getenv("META_APP_SECRET"))
+	if secret == "" {
+		secret = "qa-app-secret"
+	}
+	return secret
 }
 
 // ----------------------------------------------------------------------------
@@ -353,11 +394,7 @@ func qaPostMetaWebhook(t *testing.T, srv *server, rawPayload string) *httptest.R
 
 	req := httptest.NewRequest(http.MethodPost, "/webhook/whatsapp", strings.NewReader(rawPayload))
 	req.Header.Set("Content-Type", "application/json")
-	secret := strings.TrimSpace(os.Getenv("META_APP_SECRET"))
-	if secret == "" {
-		secret = "qa-app-secret"
-	}
-	req.Header.Set("X-Hub-Signature-256", security.SignMetaPayload(secret, []byte(rawPayload)))
+	req.Header.Set("X-Hub-Signature-256", security.SignMetaPayload(qaMetaAppSecret(t), []byte(rawPayload)))
 
 	rec := httptest.NewRecorder()
 	srv.handleWhatsAppWebhookEvent(rec, req)
@@ -416,6 +453,52 @@ func qaListMessageLogs(t *testing.T) []qaMessageLogRow {
 		t.Fatalf("iterate message logs: %v", err)
 	}
 	return logs
+}
+
+// qaInsertPendingInbound grava direto no banco uma linha inbound presa em
+// pending com created_at arbitrário — simula o repasse que morreu no meio do voo
+// (deploy/restart) e que o sweep precisa reconciliar.
+func qaInsertPendingInbound(
+	t *testing.T,
+	systemID, connectionID, sistemaOrigem, externalClientID, metaMessageID string,
+	phoneNumber, eventType, content string,
+	createdAt time.Time,
+) string {
+	t.Helper()
+
+	var connection any
+	if connectionID != "" {
+		connection = connectionID
+	}
+	var sistema any
+	if sistemaOrigem != "" {
+		sistema = sistemaOrigem
+	}
+
+	var id string
+	err := qaDB.QueryRow(`
+		INSERT INTO message_logs (
+			system_id, connection_id, sistema_origem, external_client_id, meta_message_id,
+			appointment_id, phone_number, template_name, received_content,
+			direction, status, created_at
+		)
+		VALUES ($1, $2, $3, $4, $5, '-', $6, $7, $8, 'INBOUND', 'pending', $9)
+		RETURNING id::text
+	`, systemID, connection, sistema, externalClientID, metaMessageID,
+		phoneNumber, eventType, content, createdAt).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert pending inbound log: %v", err)
+	}
+	return id
+}
+
+func qaMessageLogStatus(t *testing.T, logID string) string {
+	t.Helper()
+	var status string
+	if err := qaDB.QueryRow(`SELECT status FROM message_logs WHERE id = $1`, logID).Scan(&status); err != nil {
+		t.Fatalf("read message log status: %v", err)
+	}
+	return status
 }
 
 func qaCountMessageLogs(t *testing.T) int {

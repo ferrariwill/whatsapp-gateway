@@ -22,7 +22,11 @@ import (
 
 	"os"
 
+	"os/signal"
+
 	"strings"
+
+	"syscall"
 
 	"time"
 
@@ -64,6 +68,10 @@ const (
 
 const apiKeyHeader = "X-API-Key"
 
+// defaultShutdownTimeout é o prazo total para parar de aceitar requisições e
+// drenar os repasses inbound em voo.
+const defaultShutdownTimeout = 20 * time.Second
+
 
 
 type server struct {
@@ -81,6 +89,30 @@ type server struct {
 	usage      *service.UsageService
 
 	rateLimiter *security.RateLimiter
+
+	// relay limita a concorrência do processamento inbound e permite drenar os
+	// repasses em voo no shutdown. Nil volta ao comportamento de uma goroutine
+	// por evento (usado em testes unitários que montam o server na mão).
+	relay *relayPool
+
+	// rejectionLog amostra as linhas de log dos caminhos de rejeição dos
+	// webhooks públicos, que qualquer origem pode disparar em volume.
+	rejectionLog *logSampler
+
+}
+
+// logRejectedWebhook registra uma rejeição de webhook com amostragem.
+func (s *server) logRejectedWebhook(format string, args ...any) {
+
+	if s.rejectionLog == nil {
+
+		log.Printf(format, args...)
+
+		return
+
+	}
+
+	s.rejectionLog.Printf(format, args...)
 
 }
 
@@ -242,6 +274,10 @@ func main() {
 
 		rateLimiter: security.NewRateLimiterFromEnv(),
 
+		relay:        newRelayPool(relayPoolConfigFromEnv()),
+
+		rejectionLog: newLogSampler(envDuration("WEBHOOK_REJECTION_LOG_INTERVAL", defaultRejectionLogInterval)),
+
 	}
 
 
@@ -315,15 +351,88 @@ func main() {
 
 
 
-	log.Printf("WhatsApp Gateway listening on %s", addr)
-
 	corsCfg := loadCORSConfig()
 
-	if err := http.ListenAndServe(addr, CORSMiddleware(corsCfg, mux)); err != nil {
+	httpServer := &http.Server{
+
+		Addr:    addr,
+
+		Handler: CORSMiddleware(corsCfg, mux),
+
+	}
+
+	// O sweep de reconciliação do inbound roda enquanto o processo vive: fecha
+	// as linhas pending que o restart anterior deixou órfãs.
+	sweepCtx, stopSweeper := context.WithCancel(context.Background())
+
+	sweeperDone := make(chan struct{})
+
+	go func() {
+
+		defer close(sweeperDone)
+
+		srv.runPendingSweeper(sweepCtx, pendingSweepConfigFromEnv())
+
+	}()
+
+	signals := make(chan os.Signal, 1)
+
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+
+	serverErr := make(chan error, 1)
+
+	go func() {
+
+		log.Printf("WhatsApp Gateway listening on %s", addr)
+
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+
+			serverErr <- err
+
+		}
+
+	}()
+
+	select {
+
+	case err := <-serverErr:
+
+		stopSweeper()
 
 		log.Fatalf("server failed: %v", err)
 
+	case sig := <-signals:
+
+		log.Printf("received %s, draining", sig)
+
 	}
+
+	shutdownTimeout := envDuration("SHUTDOWN_TIMEOUT", defaultShutdownTimeout)
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+
+	defer cancelShutdown()
+
+	// Ordem importa: parar de aceitar requisições, drenar os repasses inbound já
+	// admitidos (senão ficariam pending sem ninguém avisando o SaaS) e só então
+	// encerrar o sweeper.
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+
+		log.Printf("http shutdown: %v", err)
+
+	}
+
+	if err := srv.relay.Shutdown(shutdownCtx); err != nil {
+
+		log.Printf("inbound relay shutdown: %v", err)
+
+	}
+
+	stopSweeper()
+
+	<-sweeperDone
+
+	log.Printf("WhatsApp Gateway stopped")
 
 }
 

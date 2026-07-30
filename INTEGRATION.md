@@ -245,6 +245,30 @@ Responda `200 OK` rapidamente:
 {"ok": true}
 ```
 
+### Reentrega de repasses interrompidos (`replay`)
+
+Se o Gateway for reiniciado no meio de um repasse, a linha de auditoria fica em
+`pending`. Um sweep periódico reprocessa essas linhas e reenvia o evento com o
+campo extra `"replay": true` — o corpo traz `tenant_id` **e**
+`external_client_id` porque a linha não guarda por qual endpoint o evento entrou.
+
+```json
+{
+  "system_id": "uuid-da-aplicacao-no-gateway",
+  "sistema_origem": "beleza_web",
+  "tenant_id": "45",
+  "external_client_id": "45",
+  "phone_number": "5511999887766",
+  "text": "APPT_CONFIRM",
+  "event_type": "button_reply",
+  "action": "CONFIRM",
+  "replay": true
+}
+```
+
+Trate o consumo como idempotente: um evento pode chegar em tempo real e depois
+como `replay` se a confirmação do primeiro repasse não chegou a ser gravada.
+
 ---
 
 ## 4. Auditoria de volume (API)

@@ -628,6 +628,74 @@ func (r *PostgresRepository) CountMonthlyMessagesForClient(
 	return count, nil
 }
 
+// PendingInboundLog é uma linha inbound que ficou parada em pending: o repasse
+// ao SaaS não chegou a fechar em sent nem em failed (restart, deploy, processo
+// morto no meio do voo). TargetWebhookURL já resolve conexão → aplicação mãe.
+type PendingInboundLog struct {
+	ID               string
+	SystemID         string
+	ConnectionID     string
+	SistemaOrigem    string
+	ExternalClientID string
+	MetaMessageID    string
+	PhoneNumber      string
+	EventType        string
+	ReceivedContent  string
+	TargetWebhookURL string
+	CreatedAt        time.Time
+}
+
+// ListStalePendingInboundLogs devolve as linhas inbound em pending criadas antes
+// de olderThan, mais antigas primeiro, para reconciliação pelo sweep.
+func (r *PostgresRepository) ListStalePendingInboundLogs(
+	ctx context.Context,
+	olderThan time.Time,
+	limit int,
+) ([]PendingInboundLog, error) {
+	const query = `
+		SELECT
+			ml.id::text,
+			COALESCE(ml.system_id::text, ''),
+			COALESCE(ml.connection_id::text, ''),
+			COALESCE(ml.sistema_origem, ''),
+			COALESCE(ml.external_client_id, ''),
+			COALESCE(ml.meta_message_id, ''),
+			ml.phone_number,
+			COALESCE(ml.template_name, ''),
+			COALESCE(ml.received_content, ''),
+			COALESCE(NULLIF(c.webhook_url, ''), NULLIF(s.webhook_url, ''), ''),
+			ml.created_at
+		FROM message_logs ml
+		LEFT JOIN whatsapp_connections c ON c.id = ml.connection_id
+		LEFT JOIN systems s ON s.id = ml.system_id
+		WHERE ml.direction = 'INBOUND'
+		  AND ml.status = 'pending'
+		  AND ml.created_at < $1
+		ORDER BY ml.created_at ASC
+		LIMIT $2
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, olderThan, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list stale pending inbound logs: %w", err)
+	}
+	defer rows.Close()
+
+	pending := make([]PendingInboundLog, 0)
+	for rows.Next() {
+		var row PendingInboundLog
+		if err := rows.Scan(
+			&row.ID, &row.SystemID, &row.ConnectionID, &row.SistemaOrigem, &row.ExternalClientID,
+			&row.MetaMessageID, &row.PhoneNumber, &row.EventType, &row.ReceivedContent,
+			&row.TargetWebhookURL, &row.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan stale pending inbound log: %w", err)
+		}
+		pending = append(pending, row)
+	}
+	return pending, rows.Err()
+}
+
 func (r *PostgresRepository) MarkMessageLogDelivered(
 	ctx context.Context,
 	metaMessageID string,
@@ -681,6 +749,34 @@ func (r *PostgresRepository) UpdateMessageLogStatus(
 	result, err := r.db.ExecContext(ctx, query, id, status)
 	if err != nil {
 		return fmt.Errorf("update message log status: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrMessageLogNotFound
+	}
+	return nil
+}
+
+// UpdateMessageLogStatusFromPending fecha uma linha que ainda está em pending.
+// A guarda no status evita que o sweep sobrescreva o desfecho de um repasse que
+// outro worker (ou outra instância) acabou de concluir.
+func (r *PostgresRepository) UpdateMessageLogStatusFromPending(
+	ctx context.Context,
+	id string,
+	status model.MessageStatus,
+) error {
+	const query = `
+		UPDATE message_logs
+		SET status = $2
+		WHERE id = $1
+		  AND status = 'pending'
+	`
+	result, err := r.db.ExecContext(ctx, query, id, status)
+	if err != nil {
+		return fmt.Errorf("update pending message log status: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {

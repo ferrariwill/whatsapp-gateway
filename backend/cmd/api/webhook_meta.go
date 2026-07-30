@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,7 +16,6 @@ import (
 	"github.com/whatsappgetway/gateway/internal/provider"
 	"github.com/whatsappgetway/gateway/internal/repository"
 	"github.com/whatsappgetway/gateway/internal/security"
-	"github.com/whatsappgetway/gateway/internal/service"
 )
 
 type outboundWebhookPayload struct {
@@ -27,19 +25,6 @@ type outboundWebhookPayload struct {
 	Text             string `json:"text"`
 	EventType        string `json:"event_type"`
 	Action           string `json:"action,omitempty"`
-}
-
-type metaWebhookPayload struct {
-	Object string `json:"object"`
-	Entry  []struct {
-		Changes []struct {
-			Field string `json:"field"`
-			Value struct {
-				Messages []metaInboundMessage `json:"messages"`
-				Statuses []metaMessageStatus  `json:"statuses"`
-			} `json:"value"`
-		} `json:"changes"`
-	} `json:"entry"`
 }
 
 type metaMessageStatus struct {
@@ -91,8 +76,16 @@ func (s *server) handleMetaWebhookVerify(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if _, err := s.repo.FindClientChannelByPhoneNumberID(r.Context(), phoneNumberID); errors.Is(err, repository.ErrClientChannelNotFound) {
-		http.Error(w, "unknown phone number id", http.StatusNotFound)
+	if _, err := s.repo.FindClientChannelByPhoneNumberID(r.Context(), phoneNumberID); err != nil {
+		if errors.Is(err, repository.ErrClientChannelNotFound) {
+			http.Error(w, "unknown phone number id", http.StatusNotFound)
+			return
+		}
+		// Erro de transporte não pode virar verificação bem-sucedida: sem esta
+		// guarda, uma falha de banco deixava qualquer phone_number_id assinar
+		// o webhook na Meta.
+		log.Printf("lookup client channel for webhook verify %s: %v", phoneNumberID, err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -116,7 +109,10 @@ func (s *server) handleMetaWebhookEvent(w http.ResponseWriter, r *http.Request) 
 	appSecret := strings.TrimSpace(os.Getenv("META_APP_SECRET"))
 	signature := r.Header.Get("X-Hub-Signature-256")
 	if !security.VerifyMetaSignature(appSecret, body, signature) {
-		log.Printf("webhook meta legacy: invalid or missing X-Hub-Signature-256 for phone_number_id %s", phoneNumberID)
+		s.logRejectedWebhook(
+			"webhook meta legacy: invalid or missing X-Hub-Signature-256 for phone_number_id %s",
+			phoneNumberID,
+		)
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -132,155 +128,81 @@ func (s *server) handleMetaWebhookEvent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var payload metaWebhookPayload
+	// O payload legado é o mesmo da Meta; só o phone_number_id vem da rota em
+	// vez de value.metadata. Decodificar no tipo unificado deixa um único
+	// extrator de eventos e um único caminho de status de entrega.
+	var payload unifiedMetaWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.relay.Submit(func(taskCtx context.Context) {
+		s.processLegacyMetaWebhookAsync(taskCtx, phoneNumberID, channel, payload)
+	}); err != nil {
+		log.Printf("webhook meta legacy: rejecting event for phone_number_id %s: %v", phoneNumberID, err)
+		http.Error(w, "gateway busy, retry later", http.StatusServiceUnavailable)
 		return
 	}
 
 	// Responde imediatamente à Meta (timeout de 3s); processamento em background.
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"ok":true}`))
-
-	go s.processLegacyMetaWebhookAsync(phoneNumberID, channel, payload)
 }
 
 func (s *server) processLegacyMetaWebhookAsync(
+	ctx context.Context,
 	phoneNumberID string,
 	channel *model.ClientChannelWithSystem,
-	payload metaWebhookPayload,
+	payload unifiedMetaWebhookPayload,
 ) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
+	// A conexão é resolvida uma única vez e serve tanto ao status de entrega
+	// quanto à auditoria do inbound. ErrConnectionNotFound é esperado: o canal
+	// legado em client_channels pode não ter linha em whatsapp_connections.
+	// Qualquer outro erro é de transporte e não pode virar silêncio — sem log,
+	// a linha cairia para connection_id NULL e sairia do escopo de billing por
+	// conexão (MarkMessageLogDelivered exige connection_id) sem ninguém ver.
+	conn, err := s.repo.FindConnectionByPhoneNumberID(ctx, phoneNumberID)
+	if err != nil {
+		if !errors.Is(err, repository.ErrConnectionNotFound) {
+			log.Printf("lookup connection for legacy phone_number_id %s: %v", phoneNumberID, err)
+		}
+		conn = nil
+	}
 
-	s.processDeliveryStatuses(ctx, phoneNumberID, payload)
+	connectionID := ""
+	sistemaOrigem := ""
+	if conn != nil {
+		connectionID = conn.ID
+		sistemaOrigem = conn.SistemaOrigem
+		s.processDeliveryStatusesFromPayload(ctx, conn, payload)
+	}
 
 	targetURL := strings.TrimSpace(channel.WebhookURL)
 	if targetURL == "" {
 		targetURL = strings.TrimSpace(os.Getenv("MOTHER_SYSTEM_WEBHOOK_URL"))
 	}
 
-	connectionID := ""
-	if conn, err := s.repo.FindConnectionByPhoneNumberID(ctx, phoneNumberID); err == nil {
-		connectionID = conn.ID
+	relay := inboundRelay{
+		systemID:         channel.SystemID,
+		connectionID:     connectionID,
+		sistemaOrigem:    sistemaOrigem,
+		externalClientID: channel.ExternalClientID,
+		targetURL:        targetURL,
+		label:            "legacy " + channel.SystemID + "/" + channel.ExternalClientID,
+		buildPayload: func(event inboundEvent) any {
+			return outboundWebhookPayload{
+				SystemID:         channel.SystemID,
+				ExternalClientID: channel.ExternalClientID,
+				PhoneNumber:      event.from,
+				Text:             event.text,
+				EventType:        event.eventType,
+				Action:           event.action,
+			}
+		},
 	}
 
-	events := extractInboundEvents(payload)
-	for _, event := range events {
-		inboundLog := &model.MessageLog{
-			SystemID:         channel.SystemID,
-			ConnectionID:     connectionID,
-			ExternalClientID: channel.ExternalClientID,
-			MetaMessageID:    event.id,
-			AppointmentID:    "-",
-			PhoneNumber:      event.from,
-			TemplateName:     event.eventType,
-			ReceivedContent:  event.text,
-			Direction:        model.MessageDirectionInbound,
-			Status:           model.MessageStatusPending,
-		}
-		if err := s.repo.CreateMessageLog(ctx, inboundLog); err != nil {
-			if errors.Is(err, repository.ErrDuplicateMessageLog) {
-				log.Printf(
-					"dedup inbound legacy %s/%s meta_message_id=%s — skipping SaaS relay",
-					channel.SystemID, channel.ExternalClientID, event.id,
-				)
-				continue
-			}
-			log.Printf(
-				"audit inbound log for system %s client %s: %v",
-				channel.SystemID,
-				channel.ExternalClientID,
-				err,
-			)
-			continue
-		}
-
-		if targetURL == "" {
-			log.Printf(
-				"skip outbound webhook: system %s channel %s has no webhook_url",
-				channel.SystemID,
-				channel.ExternalClientID,
-			)
-			if err := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusFailed); err != nil {
-				log.Printf("mark inbound legacy %s failed (no webhook): %v", inboundLog.ID, err)
-			}
-			continue
-		}
-
-		outbound := outboundWebhookPayload{
-			SystemID:         channel.SystemID,
-			ExternalClientID: channel.ExternalClientID,
-			PhoneNumber:      event.from,
-			Text:             event.text,
-			EventType:        event.eventType,
-			Action:           event.action,
-		}
-
-		if err := s.forwardOutboundWebhookWithRetry(ctx, targetURL, outbound); err != nil {
-			log.Printf(
-				"forward webhook to %s for system %s client %s failed after retries: %v",
-				targetURL,
-				channel.SystemID,
-				channel.ExternalClientID,
-				err,
-			)
-			if updErr := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusFailed); updErr != nil {
-				log.Printf("mark inbound legacy %s failed: %v", inboundLog.ID, updErr)
-			}
-			continue
-		}
-
-		if err := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusSent); err != nil {
-			log.Printf("mark inbound legacy %s sent after SaaS relay: %v", inboundLog.ID, err)
-		}
-	}
-}
-
-func (s *server) processDeliveryStatuses(ctx context.Context, phoneNumberID string, payload metaWebhookPayload) {
-	conn, err := s.repo.FindConnectionByPhoneNumberID(ctx, phoneNumberID)
-	if err != nil {
-		if !errors.Is(err, repository.ErrConnectionNotFound) {
-			log.Printf("lookup connection for delivery status phone_number_id %s: %v", phoneNumberID, err)
-		}
-		return
-	}
-
-	for _, entry := range payload.Entry {
-		for _, change := range entry.Changes {
-			if change.Field != "messages" {
-				continue
-			}
-			for _, statusUpdate := range change.Value.Statuses {
-				if strings.ToLower(strings.TrimSpace(statusUpdate.Status)) != "delivered" {
-					continue
-				}
-
-				metaMessageID := strings.TrimSpace(statusUpdate.ID)
-				if metaMessageID == "" {
-					continue
-				}
-
-				category := service.CategoryUtility
-				if statusUpdate.Pricing != nil && strings.TrimSpace(statusUpdate.Pricing.Category) != "" {
-					category = service.NormalizeCategory(statusUpdate.Pricing.Category)
-				}
-
-				metaCost := service.MetaCostForCategory(category)
-				deliveredAt := parseMetaWebhookTimestamp(statusUpdate.Timestamp)
-
-				if err := s.repo.MarkMessageLogDelivered(
-					ctx, metaMessageID, conn.ID, model.MessageCategory(category), metaCost, deliveredAt,
-				); err != nil {
-					if errors.Is(err, repository.ErrMessageLogNotFound) {
-						log.Printf("delivery webhook for unknown/unscoped meta_message_id %s", metaMessageID)
-						continue
-					}
-					log.Printf("mark message %s delivered: %v", metaMessageID, err)
-				}
-			}
-		}
-	}
+	s.relayInboundEvents(ctx, relay, extractInboundEventsFromUnified(payload))
 }
 
 func parseMetaWebhookTimestamp(raw string) time.Time {
@@ -301,27 +223,6 @@ type inboundEvent struct {
 	text      string
 	eventType string
 	action    string
-}
-
-func extractInboundEvents(payload metaWebhookPayload) []inboundEvent {
-	events := make([]inboundEvent, 0)
-
-	for _, entry := range payload.Entry {
-		for _, change := range entry.Changes {
-			if change.Field != "messages" {
-				continue
-			}
-
-			for _, message := range change.Value.Messages {
-				event, ok := parseInboundMessage(message)
-				if ok {
-					events = append(events, event)
-				}
-			}
-		}
-	}
-
-	return events
 }
 
 func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
@@ -388,58 +289,6 @@ func mapButtonAction(payload string) string {
 	default:
 		return ""
 	}
-}
-
-func (s *server) forwardOutboundWebhook(ctx context.Context, targetURL string, payload outboundWebhookPayload) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.metaClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		respBody, _ := io.ReadAll(resp.Body)
-		return errors.New(strings.TrimSpace(string(respBody)))
-	}
-
-	return nil
-}
-
-func (s *server) forwardOutboundWebhookWithRetry(ctx context.Context, targetURL string, payload outboundWebhookPayload) error {
-	delays := []time.Duration{0, 200 * time.Millisecond, 500 * time.Millisecond, time.Second}
-	var lastErr error
-	for attempt, delay := range delays {
-		if delay > 0 {
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				if lastErr != nil {
-					return lastErr
-				}
-				return ctx.Err()
-			case <-timer.C:
-			}
-		}
-
-		lastErr = s.forwardOutboundWebhook(ctx, targetURL, payload)
-		if lastErr == nil {
-			return nil
-		}
-		log.Printf("legacy saas webhook attempt %d/%d to %s failed: %v", attempt+1, len(delays), targetURL, lastErr)
-	}
-	return lastErr
 }
 
 func (s *server) createClientChannel(

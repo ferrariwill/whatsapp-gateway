@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/whatsappgetway/gateway/internal/model"
 	"github.com/whatsappgetway/gateway/internal/repository"
@@ -72,7 +70,7 @@ func (s *server) handleWhatsAppWebhookEvent(w http.ResponseWriter, r *http.Reque
 	appSecret := strings.TrimSpace(os.Getenv("META_APP_SECRET"))
 	signature := r.Header.Get("X-Hub-Signature-256")
 	if !security.VerifyMetaSignature(appSecret, body, signature) {
-		log.Printf("webhook whatsapp: invalid or missing X-Hub-Signature-256")
+		s.logRejectedWebhook("webhook whatsapp: invalid or missing X-Hub-Signature-256")
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -104,18 +102,27 @@ func (s *server) handleWhatsAppWebhookEvent(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Processamento assíncrono: status de entrega + repasse ao SaaS. A admissão
+	// no pool acontece antes do 200 para que uma rajada além da capacidade vire
+	// 503 (Meta reentrega) em vez de goroutines sem limite.
+	if err := s.relay.Submit(func(taskCtx context.Context) {
+		s.processWebhookPayloadAsync(taskCtx, conn, payload)
+	}); err != nil {
+		log.Printf("webhook whatsapp: rejecting event for phone_number_id %s: %v", phoneNumberID, err)
+		http.Error(w, "gateway busy, retry later", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Responde imediatamente à Meta (timeout de 3s).
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"ok":true}`))
-
-	// Processamento assíncrono: status de entrega + repasse ao SaaS.
-	go s.processWebhookPayloadAsync(conn, payload)
 }
 
-func (s *server) processWebhookPayloadAsync(conn *model.WhatsAppConnection, payload unifiedMetaWebhookPayload) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-
+func (s *server) processWebhookPayloadAsync(
+	ctx context.Context,
+	conn *model.WhatsAppConnection,
+	payload unifiedMetaWebhookPayload,
+) {
 	s.processDeliveryStatusesFromPayload(ctx, conn, payload)
 
 	targetURL := strings.TrimSpace(conn.WebhookURL)
@@ -123,62 +130,27 @@ func (s *server) processWebhookPayloadAsync(conn *model.WhatsAppConnection, payl
 		targetURL = strings.TrimSpace(os.Getenv("MOTHER_SYSTEM_WEBHOOK_URL"))
 	}
 
-	events := extractInboundEventsFromUnified(payload)
-	for _, event := range events {
-		inboundLog := &model.MessageLog{
-			SystemID:         conn.SystemID,
-			ConnectionID:     conn.ID,
-			SistemaOrigem:    conn.SistemaOrigem,
-			ExternalClientID: conn.TenantID,
-			MetaMessageID:    event.id,
-			AppointmentID:    "-",
-			PhoneNumber:      event.from,
-			TemplateName:     event.eventType,
-			ReceivedContent:  event.text,
-			Direction:        model.MessageDirectionInbound,
-			Status:           model.MessageStatusPending,
-		}
-		if err := s.repo.CreateMessageLog(ctx, inboundLog); err != nil {
-			if errors.Is(err, repository.ErrDuplicateMessageLog) {
-				log.Printf("dedup inbound %s/%s meta_message_id=%s — skipping SaaS relay",
-					conn.SistemaOrigem, conn.TenantID, event.id)
-				continue
+	relay := inboundRelay{
+		systemID:         conn.SystemID,
+		connectionID:     conn.ID,
+		sistemaOrigem:    conn.SistemaOrigem,
+		externalClientID: conn.TenantID,
+		targetURL:        targetURL,
+		label:            conn.SistemaOrigem + "/" + conn.TenantID,
+		buildPayload: func(event inboundEvent) any {
+			return saasWebhookPayload{
+				SystemID:      conn.SystemID,
+				SistemaOrigem: conn.SistemaOrigem,
+				TenantID:      conn.TenantID,
+				PhoneNumber:   event.from,
+				Text:          event.text,
+				EventType:     event.eventType,
+				Action:        event.action,
 			}
-			log.Printf("audit inbound %s/%s: %v", conn.SistemaOrigem, conn.TenantID, err)
-			continue
-		}
-
-		if targetURL == "" {
-			log.Printf("skip saas webhook: %s/%s has no webhook_url", conn.SistemaOrigem, conn.TenantID)
-			if err := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusFailed); err != nil {
-				log.Printf("mark inbound %s failed (no webhook): %v", inboundLog.ID, err)
-			}
-			continue
-		}
-
-		outbound := saasWebhookPayload{
-			SystemID:      conn.SystemID,
-			SistemaOrigem: conn.SistemaOrigem,
-			TenantID:      conn.TenantID,
-			PhoneNumber:   event.from,
-			Text:          event.text,
-			EventType:     event.eventType,
-			Action:        event.action,
-		}
-
-		if err := s.forwardSaaSWebhookWithRetry(ctx, targetURL, outbound); err != nil {
-			log.Printf("forward webhook to %s for %s/%s failed after retries: %v",
-				targetURL, conn.SistemaOrigem, conn.TenantID, err)
-			if updErr := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusFailed); updErr != nil {
-				log.Printf("mark inbound %s failed: %v", inboundLog.ID, updErr)
-			}
-			continue
-		}
-
-		if err := s.repo.UpdateMessageLogStatus(ctx, inboundLog.ID, model.MessageStatusSent); err != nil {
-			log.Printf("mark inbound %s sent after SaaS relay: %v", inboundLog.ID, err)
-		}
+		},
 	}
+
+	s.relayInboundEvents(ctx, relay, extractInboundEventsFromUnified(payload))
 }
 
 func extractPhoneNumberIDFromPayload(payload unifiedMetaWebhookPayload) string {
@@ -253,53 +225,6 @@ func extractInboundEventsFromUnified(payload unifiedMetaWebhookPayload) []inboun
 	return events
 }
 
-func (s *server) forwardSaaSWebhookWithRetry(ctx context.Context, targetURL string, payload saasWebhookPayload) error {
-	delays := []time.Duration{0, 200 * time.Millisecond, 500 * time.Millisecond, time.Second}
-	var lastErr error
-	for attempt, delay := range delays {
-		if delay > 0 {
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				if lastErr != nil {
-					return lastErr
-				}
-				return ctx.Err()
-			case <-timer.C:
-			}
-		}
-
-		lastErr = s.forwardSaaSWebhook(ctx, targetURL, payload)
-		if lastErr == nil {
-			return nil
-		}
-		log.Printf("saas webhook attempt %d/%d to %s failed: %v", attempt+1, len(delays), targetURL, lastErr)
-	}
-	return lastErr
-}
-
-func (s *server) forwardSaaSWebhook(ctx context.Context, targetURL string, payload saasWebhookPayload) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.metaClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		respBody, _ := io.ReadAll(resp.Body)
-		return errors.New(strings.TrimSpace(string(respBody)))
-	}
-	return nil
-}
+// O repasse ao SaaS e a política de backoff são únicos e vivem em
+// inbound_relay.go (forwardWebhookWithRetry), compartilhados com o endpoint
+// legado e com o sweep de reconciliação.
