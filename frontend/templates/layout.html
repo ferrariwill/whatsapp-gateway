@@ -5,6 +5,8 @@
   {{template "head.html" .}}
 </head>
 <body class="h-full bg-slate-950 text-slate-100 antialiased">
+  <div id="admin-toast" class="pointer-events-none fixed inset-x-0 bottom-4 z-[60] flex justify-center px-4" aria-live="polite" aria-atomic="true"></div>
+  <div id="copy-announce" class="sr-only" aria-live="polite" aria-atomic="true"></div>
   {{block "content" .}}{{end}}
 </body>
 </html>

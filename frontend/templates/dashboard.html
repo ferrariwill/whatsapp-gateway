@@ -114,20 +114,26 @@
           hx-get="/admin/usage/volume"
           hx-target="#usage-volume-card"
           hx-trigger="change, load"
+          hx-indicator="#usage-volume-loading"
         >
           <div>
-            <label class="mb-1 block text-xs text-slate-400">Mês</label>
-            <input name="month" type="number" min="1" max="12" value="{{.UsageMonth}}" class="w-20 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500/50">
+            <label for="usage-month" class="mb-1 block text-xs text-slate-400">Mês</label>
+            <input id="usage-month" name="month" type="number" min="1" max="12" inputmode="numeric" value="{{.UsageMonth}}" class="w-20 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500/50">
           </div>
           <div>
-            <label class="mb-1 block text-xs text-slate-400">Ano</label>
-            <input name="year" type="number" min="2020" max="2099" value="{{.UsageYear}}" class="w-24 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500/50">
+            <label for="usage-year" class="mb-1 block text-xs text-slate-400">Ano</label>
+            <input id="usage-year" name="year" type="number" min="2020" max="2099" inputmode="numeric" value="{{.UsageYear}}" class="w-24 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-500/50">
           </div>
-          <button type="submit" class="rounded-xl border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800">Atualizar</button>
+          <button type="submit" class="min-h-[44px] rounded-xl border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800">Atualizar</button>
         </form>
       </div>
 
-      <div id="usage-volume-card" class="min-h-[120px]">
+      <div id="usage-volume-loading" class="htmx-indicator mb-3 flex-col space-y-3" aria-hidden="true">
+        <div class="h-16 animate-pulse rounded-xl bg-slate-800/80"></div>
+        <div class="h-24 animate-pulse rounded-xl bg-slate-800/60"></div>
+        <div class="h-24 animate-pulse rounded-xl bg-slate-800/40"></div>
+      </div>
+      <div id="usage-volume-card" class="min-h-[120px]" aria-live="polite">
         <p class="text-sm text-slate-500">Carregando volume de disparos...</p>
       </div>
     </section>
@@ -149,17 +155,15 @@
   </main>
 </div>
 
-<div id="add-channel-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
-  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+<div id="add-channel-modal" class="hidden fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 px-0 backdrop-blur-sm sm:px-4 lg:items-center" role="dialog" aria-modal="true" aria-labelledby="add-channel-modal-title" aria-hidden="true">
+  <div data-modal-panel tabindex="-1" class="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl lg:rounded-2xl">
     <div class="mb-6 flex items-center justify-between">
       <div>
-        <h3 class="text-lg font-semibold text-white">Vincular canal WhatsApp</h3>
+        <h3 id="add-channel-modal-title" class="text-lg font-semibold text-white">Vincular canal WhatsApp</h3>
         <p class="text-sm text-slate-400">Associe um cliente externo da aplicação ao chip WhatsApp da Meta.</p>
       </div>
-      <button type="button" onclick="closeModal('add-channel-modal')" class="text-slate-400 hover:text-white">&times;</button>
+      <button type="button" data-modal-close onclick="closeModal('add-channel-modal')" aria-label="Fechar" class="inline-flex h-11 w-11 items-center justify-center text-2xl text-slate-400 hover:text-white">&times;</button>
     </div>
-
-    <div id="channel-form-feedback"></div>
 
     <form
       hx-post="/admin/channels"
@@ -169,7 +173,7 @@
       class="space-y-4"
     >
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Aplicação</label>
+        <label for="add-channel-system-select" class="mb-1 block text-sm text-slate-300">Aplicação</label>
         <select id="add-channel-system-select" name="system_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20">
           {{range .Systems}}
           <option value="{{.ID}}">{{.Name}}</option>
@@ -178,46 +182,47 @@
       </div>
 
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Rótulo do canal</label>
-        <input name="salon_name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20" placeholder="Canal principal">
+        <label for="add-channel-salon-name" class="mb-1 block text-sm text-slate-300">Rótulo do canal</label>
+        <input id="add-channel-salon-name" name="salon_name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20" placeholder="Canal principal">
         <p class="mt-1 text-xs text-slate-500">Nome interno para identificar o chip (opcional para operação).</p>
       </div>
 
       <div>
-        <label class="mb-1 block text-sm text-slate-300">ID do cliente externo</label>
-        <input name="external_client_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20" placeholder="45">
+        <label for="add-channel-external-client-id" class="mb-1 block text-sm text-slate-300">ID do cliente externo</label>
+        <input id="add-channel-external-client-id" name="external_client_id" required inputmode="numeric" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20" placeholder="45">
         <p class="mt-1 text-xs text-slate-500">Identificador do tenant/cliente na aplicação de origem.</p>
       </div>
 
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Número de telefone</label>
-        <input name="whatsapp_phone_number" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20" placeholder="5511999999999">
+        <label for="add-channel-whatsapp-phone" class="mb-1 block text-sm text-slate-300">Número de telefone</label>
+        <input id="add-channel-whatsapp-phone" name="whatsapp_phone_number" required inputmode="tel" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20" placeholder="5511999999999">
         <p class="mt-1 text-xs text-slate-500">DDD + número, sem símbolos.</p>
       </div>
 
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Phone Number ID da Meta</label>
-        <input name="phone_number_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20" placeholder="123456789012345">
+        <label for="add-channel-phone-number-id" class="mb-1 block text-sm text-slate-300">Phone Number ID da Meta</label>
+        <input id="add-channel-phone-number-id" name="phone_number_id" required inputmode="numeric" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/20" placeholder="123456789012345">
       </div>
 
+      <div id="channel-form-feedback" class="min-h-0"></div>
+
       <div class="flex justify-end gap-3 pt-2">
-        <button type="button" onclick="closeModal('add-channel-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
-        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Salvar</button>
+        <button type="button" onclick="closeModal('add-channel-modal')" class="min-h-[44px] rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="min-h-[44px] rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Salvar</button>
       </div>
     </form>
   </div>
 </div>
 
-<div id="add-system-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
-  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+<div id="add-system-modal" class="hidden fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 px-0 backdrop-blur-sm sm:px-4 lg:items-center" role="dialog" aria-modal="true" aria-labelledby="add-system-modal-title" aria-hidden="true">
+  <div data-modal-panel tabindex="-1" class="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl lg:rounded-2xl">
     <div class="mb-6 flex items-center justify-between">
       <div>
-        <h3 class="text-lg font-semibold text-white">Nova aplicação</h3>
+        <h3 id="add-system-modal-title" class="text-lg font-semibold text-white">Nova aplicação</h3>
         <p class="text-sm text-slate-400">Gera automaticamente uma API Key (<code class="text-emerald-300">sk_live_…</code>).</p>
       </div>
-      <button type="button" onclick="closeModal('add-system-modal')" class="text-slate-400 hover:text-white">&times;</button>
+      <button type="button" data-modal-close onclick="closeModal('add-system-modal')" aria-label="Fechar" class="inline-flex h-11 w-11 items-center justify-center text-2xl text-slate-400 hover:text-white">&times;</button>
     </div>
-    <div id="system-form-feedback"></div>
     <form
       hx-post="/admin/systems"
       hx-target="#systems-list"
@@ -226,36 +231,36 @@
       class="space-y-4"
     >
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Nome da aplicação</label>
-        <input name="name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50" placeholder="Beleza Web">
+        <label for="add-system-name" class="mb-1 block text-sm text-slate-300">Nome da aplicação</label>
+        <input id="add-system-name" name="name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50" placeholder="Beleza Web">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Slug (identificador único)</label>
-        <input name="slug" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-emerald-300 outline-none focus:border-emerald-500/50" placeholder="beleza_web (opcional — gerado do nome)">
+        <label for="add-system-slug" class="mb-1 block text-sm text-slate-300">Slug (identificador único)</label>
+        <input id="add-system-slug" name="slug" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-emerald-300 outline-none focus:border-emerald-500/50" placeholder="beleza_web (opcional — gerado do nome)">
         <p class="mt-1 text-xs text-slate-500">Identifica a aplicação no Embedded Signup. O state OAuth é emitido por <code class="text-emerald-300">POST /v1/embedded-signup/state</code> — não monte o state à mão.</p>
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Webhook URL (opcional)</label>
-        <input name="webhook_url" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50" placeholder="https://sua-app.com/webhook">
+        <label for="add-system-webhook" class="mb-1 block text-sm text-slate-300">Webhook URL (opcional)</label>
+        <input id="add-system-webhook" name="webhook_url" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50" placeholder="https://sua-app.com/webhook">
       </div>
+      <div id="system-form-feedback" class="min-h-0"></div>
       <div class="flex justify-end gap-3 pt-2">
-        <button type="button" onclick="closeModal('add-system-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
-        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Salvar</button>
+        <button type="button" onclick="closeModal('add-system-modal')" class="min-h-[44px] rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="min-h-[44px] rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Salvar</button>
       </div>
     </form>
   </div>
 </div>
 
-<div id="edit-system-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
-  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+<div id="edit-system-modal" class="hidden fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 px-0 backdrop-blur-sm sm:px-4 lg:items-center" role="dialog" aria-modal="true" aria-labelledby="edit-system-modal-title" aria-hidden="true">
+  <div data-modal-panel tabindex="-1" class="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl lg:rounded-2xl">
     <div class="mb-6 flex items-center justify-between">
       <div>
-        <h3 class="text-lg font-semibold text-white">Editar aplicação</h3>
+        <h3 id="edit-system-modal-title" class="text-lg font-semibold text-white">Editar aplicação</h3>
         <p class="text-sm text-slate-400">A API Key não pode ser alterada aqui — gere uma nova aplicação se necessário.</p>
       </div>
-      <button type="button" onclick="closeModal('edit-system-modal')" class="text-slate-400 hover:text-white">&times;</button>
+      <button type="button" data-modal-close onclick="closeModal('edit-system-modal')" aria-label="Fechar" class="inline-flex h-11 w-11 items-center justify-center text-2xl text-slate-400 hover:text-white">&times;</button>
     </div>
-    <div id="edit-system-form-feedback"></div>
     <form
       id="edit-system-form"
       hx-post=""
@@ -264,35 +269,35 @@
       class="space-y-4"
     >
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Nome da aplicação</label>
-        <input name="name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-system-name" class="mb-1 block text-sm text-slate-300">Nome da aplicação</label>
+        <input id="edit-system-name" name="name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Slug (identificador único)</label>
-        <input name="slug" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-emerald-300 outline-none focus:border-emerald-500/50">
+        <label for="edit-system-slug" class="mb-1 block text-sm text-slate-300">Slug (identificador único)</label>
+        <input id="edit-system-slug" name="slug" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-emerald-300 outline-none focus:border-emerald-500/50">
         <p class="mt-1 text-xs text-slate-500">Embedded Signup: peça o state assinado em <code class="text-emerald-300">POST /v1/embedded-signup/state</code> com a API Key da aplicação.</p>
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Webhook URL</label>
-        <input name="webhook_url" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-system-webhook" class="mb-1 block text-sm text-slate-300">Webhook URL</label>
+        <input id="edit-system-webhook" name="webhook_url" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
+      <div id="edit-system-form-feedback" class="min-h-0"></div>
       <div class="flex justify-end gap-3 pt-2">
-        <button type="button" onclick="closeModal('edit-system-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
-        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Atualizar</button>
+        <button type="button" onclick="closeModal('edit-system-modal')" class="min-h-[44px] rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="min-h-[44px] rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Atualizar</button>
       </div>
     </form>
   </div>
 </div>
 
-<div id="edit-channel-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
-  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+<div id="edit-channel-modal" class="hidden fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 px-0 backdrop-blur-sm sm:px-4 lg:items-center" role="dialog" aria-modal="true" aria-labelledby="edit-channel-modal-title" aria-hidden="true">
+  <div data-modal-panel tabindex="-1" class="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl lg:rounded-2xl">
     <div class="mb-6 flex items-center justify-between">
       <div>
-        <h3 class="text-lg font-semibold text-white">Editar canal WhatsApp</h3>
+        <h3 id="edit-channel-modal-title" class="text-lg font-semibold text-white">Editar canal WhatsApp</h3>
       </div>
-      <button type="button" onclick="closeModal('edit-channel-modal')" class="text-slate-400 hover:text-white">&times;</button>
+      <button type="button" data-modal-close onclick="closeModal('edit-channel-modal')" aria-label="Fechar" class="inline-flex h-11 w-11 items-center justify-center text-2xl text-slate-400 hover:text-white">&times;</button>
     </div>
-    <div id="edit-channel-form-feedback"></div>
     <form
       id="edit-channel-form"
       hx-post=""
@@ -301,7 +306,7 @@
       class="space-y-4"
     >
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Aplicação</label>
+        <label for="edit-channel-system-select" class="mb-1 block text-sm text-slate-300">Aplicação</label>
         <select id="edit-channel-system-select" name="system_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
           {{range .Systems}}
           <option value="{{.ID}}">{{.Name}}</option>
@@ -309,39 +314,39 @@
         </select>
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Rótulo do canal</label>
-        <input name="salon_name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-channel-salon-name" class="mb-1 block text-sm text-slate-300">Rótulo do canal</label>
+        <input id="edit-channel-salon-name" name="salon_name" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">ID do cliente externo</label>
-        <input name="external_client_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-channel-external-client-id" class="mb-1 block text-sm text-slate-300">ID do cliente externo</label>
+        <input id="edit-channel-external-client-id" name="external_client_id" required inputmode="numeric" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Número de telefone</label>
-        <input name="whatsapp_phone_number" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-channel-whatsapp-phone" class="mb-1 block text-sm text-slate-300">Número de telefone</label>
+        <input id="edit-channel-whatsapp-phone" name="whatsapp_phone_number" required inputmode="tel" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Phone Number ID da Meta</label>
-        <input name="phone_number_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-channel-phone-number-id" class="mb-1 block text-sm text-slate-300">Phone Number ID da Meta</label>
+        <input id="edit-channel-phone-number-id" name="phone_number_id" required inputmode="numeric" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
       </div>
+      <div id="edit-channel-form-feedback" class="min-h-0"></div>
       <div class="flex justify-end gap-3 pt-2">
-        <button type="button" onclick="closeModal('edit-channel-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
-        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Atualizar</button>
+        <button type="button" onclick="closeModal('edit-channel-modal')" class="min-h-[44px] rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="min-h-[44px] rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Atualizar</button>
       </div>
     </form>
   </div>
 </div>
 
-<div id="add-connection-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
-  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+<div id="add-connection-modal" class="hidden fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 px-0 backdrop-blur-sm sm:px-4 lg:items-center" role="dialog" aria-modal="true" aria-labelledby="add-connection-modal-title" aria-hidden="true">
+  <div data-modal-panel tabindex="-1" class="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl lg:rounded-2xl">
     <div class="mb-6 flex items-center justify-between">
       <div>
-        <h3 class="text-lg font-semibold text-white">Nova conexão WhatsApp</h3>
+        <h3 id="add-connection-modal-title" class="text-lg font-semibold text-white">Nova conexão WhatsApp</h3>
         <p class="text-sm text-slate-400">Credenciais Meta exclusivas do tenant (clínica, salão, etc.).</p>
       </div>
-      <button type="button" onclick="closeModal('add-connection-modal')" class="text-slate-400 hover:text-white">&times;</button>
+      <button type="button" data-modal-close onclick="closeModal('add-connection-modal')" aria-label="Fechar" class="inline-flex h-11 w-11 items-center justify-center text-2xl text-slate-400 hover:text-white">&times;</button>
     </div>
-    <div id="connection-form-feedback"></div>
     <form
       hx-post="/admin/connections"
       hx-target="#connections-list"
@@ -350,7 +355,7 @@
       class="space-y-4"
     >
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Aplicação mãe</label>
+        <label for="add-connection-system-select" class="mb-1 block text-sm text-slate-300">Aplicação mãe</label>
         <select id="add-connection-system-select" name="system_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
           <option value="">Selecione…</option>
           {{range .SystemOptions}}
@@ -359,46 +364,46 @@
         </select>
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Tenant ID</label>
-        <input name="tenant_id" required placeholder="ID da empresa no SaaS" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="add-connection-tenant-id" class="mb-1 block text-sm text-slate-300">Tenant ID</label>
+        <input id="add-connection-tenant-id" name="tenant_id" required inputmode="text" placeholder="ID da empresa no SaaS" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">WABA ID</label>
-        <input name="waba_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+        <label for="add-connection-waba-id" class="mb-1 block text-sm text-slate-300">WABA ID</label>
+        <input id="add-connection-waba-id" name="waba_id" required inputmode="numeric" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Phone Number ID</label>
-        <input name="phone_number_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+        <label for="add-connection-phone-number-id" class="mb-1 block text-sm text-slate-300">Phone Number ID</label>
+        <input id="add-connection-phone-number-id" name="phone_number_id" required inputmode="numeric" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Access Token (longa duração)</label>
-        <input name="access_token" required type="password" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+        <label for="add-connection-access-token" class="mb-1 block text-sm text-slate-300">Access Token (longa duração)</label>
+        <input id="add-connection-access-token" name="access_token" required type="password" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Webhook URL do SaaS</label>
-        <input name="webhook_url" placeholder="https://app.exemplo.com/webhook/whatsapp" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="add-connection-webhook" class="mb-1 block text-sm text-slate-300">Webhook URL do SaaS</label>
+        <input id="add-connection-webhook" name="webhook_url" placeholder="https://app.exemplo.com/webhook/whatsapp" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Telefone WhatsApp (opcional)</label>
-        <input name="whatsapp_phone_number" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="add-connection-whatsapp-phone" class="mb-1 block text-sm text-slate-300">Telefone WhatsApp (opcional)</label>
+        <input id="add-connection-whatsapp-phone" name="whatsapp_phone_number" inputmode="tel" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
+      <div id="connection-form-feedback" class="min-h-0"></div>
       <div class="flex justify-end gap-3 pt-2">
-        <button type="button" onclick="closeModal('add-connection-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
-        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Salvar</button>
+        <button type="button" onclick="closeModal('add-connection-modal')" class="min-h-[44px] rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="min-h-[44px] rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Salvar</button>
       </div>
     </form>
   </div>
 </div>
 
-<div id="edit-connection-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
-  <div class="w-full max-w-lg rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
+<div id="edit-connection-modal" class="hidden fixed inset-0 z-50 flex items-end justify-center bg-slate-950/80 px-0 backdrop-blur-sm sm:px-4 lg:items-center" role="dialog" aria-modal="true" aria-labelledby="edit-connection-modal-title" aria-hidden="true">
+  <div data-modal-panel tabindex="-1" class="w-full max-w-lg max-h-[90dvh] overflow-y-auto rounded-t-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl lg:rounded-2xl">
     <div class="mb-6 flex items-center justify-between">
       <div>
-        <h3 class="text-lg font-semibold text-white">Editar conexão WhatsApp</h3>
+        <h3 id="edit-connection-modal-title" class="text-lg font-semibold text-white">Editar conexão WhatsApp</h3>
       </div>
-      <button type="button" onclick="closeModal('edit-connection-modal')" class="text-slate-400 hover:text-white">&times;</button>
+      <button type="button" data-modal-close onclick="closeModal('edit-connection-modal')" aria-label="Fechar" class="inline-flex h-11 w-11 items-center justify-center text-2xl text-slate-400 hover:text-white">&times;</button>
     </div>
-    <div id="edit-connection-form-feedback"></div>
     <form
       id="edit-connection-form"
       hx-post=""
@@ -407,7 +412,7 @@
       class="space-y-4"
     >
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Aplicação mãe</label>
+        <label for="edit-connection-system-select" class="mb-1 block text-sm text-slate-300">Aplicação mãe</label>
         <select id="edit-connection-system-select" name="system_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
           {{range $.SystemOptions}}
           <option value="{{.ID}}">{{.Name}} ({{.Slug}})</option>
@@ -415,32 +420,33 @@
         </select>
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Tenant ID</label>
-        <input name="tenant_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-connection-tenant-id" class="mb-1 block text-sm text-slate-300">Tenant ID</label>
+        <input id="edit-connection-tenant-id" name="tenant_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">WABA ID</label>
-        <input name="waba_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-connection-waba-id" class="mb-1 block text-sm text-slate-300">WABA ID</label>
+        <input id="edit-connection-waba-id" name="waba_id" required inputmode="numeric" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Phone Number ID</label>
-        <input name="phone_number_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-connection-phone-number-id" class="mb-1 block text-sm text-slate-300">Phone Number ID</label>
+        <input id="edit-connection-phone-number-id" name="phone_number_id" required inputmode="numeric" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Access Token (deixe vazio para manter)</label>
-        <input name="access_token" type="password" placeholder="••••••••" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-connection-access-token" class="mb-1 block text-sm text-slate-300">Access Token (deixe vazio para manter)</label>
+        <input id="edit-connection-access-token" name="access_token" type="password" placeholder="••••••••" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm font-mono text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Webhook URL do SaaS</label>
-        <input name="webhook_url" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-connection-webhook" class="mb-1 block text-sm text-slate-300">Webhook URL do SaaS</label>
+        <input id="edit-connection-webhook" name="webhook_url" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
       <div>
-        <label class="mb-1 block text-sm text-slate-300">Telefone WhatsApp (opcional)</label>
-        <input name="whatsapp_phone_number" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        <label for="edit-connection-whatsapp-phone" class="mb-1 block text-sm text-slate-300">Telefone WhatsApp (opcional)</label>
+        <input id="edit-connection-whatsapp-phone" name="whatsapp_phone_number" inputmode="tel" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
       </div>
+      <div id="edit-connection-form-feedback" class="min-h-0"></div>
       <div class="flex justify-end gap-3 pt-2">
-        <button type="button" onclick="closeModal('edit-connection-modal')" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
-        <button type="submit" class="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Atualizar</button>
+        <button type="button" onclick="closeModal('edit-connection-modal')" class="min-h-[44px] rounded-xl border border-slate-700 px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800">Cancelar</button>
+        <button type="submit" class="min-h-[44px] rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Atualizar</button>
       </div>
     </form>
   </div>
