@@ -165,7 +165,7 @@ func requireQADB(t *testing.T) {
 
 func resetQAData(t *testing.T) {
 	t.Helper()
-	_, err := qaDB.Exec(`TRUNCATE message_delivery_events, oauth_state_nonces, message_logs, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
+	_, err := qaDB.Exec(`TRUNCATE webhook_event_dedupe, whatsapp_templates, message_delivery_events, oauth_state_nonces, message_logs, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset qa data: %v", err)
 	}
@@ -383,7 +383,45 @@ func createQAConnection(
 	if err := repository.NewPostgresRepository(qaDB).CreateWhatsAppConnection(context.Background(), conn); err != nil {
 		t.Fatalf("create connection %s/%s: %v", system.Slug, tenantID, err)
 	}
+	// Catálogo local padrão usado pelos testes de send (confirma_agendamento, 2 params).
+	seedQAApprovedTemplate(t, conn, "confirma_agendamento", "pt_BR", 2)
 	return conn
+}
+
+func seedQAApprovedTemplate(
+	t *testing.T,
+	conn *model.WhatsAppConnection,
+	name, language string,
+	expectedBodyParams int,
+) {
+	t.Helper()
+	body := "Oi"
+	if expectedBodyParams > 0 {
+		parts := make([]string, expectedBodyParams)
+		for i := range parts {
+			parts[i] = fmt.Sprintf("{{%d}}", i+1)
+		}
+		body = strings.Join(parts, " ")
+	}
+	components := []byte(fmt.Sprintf(`[{"type":"BODY","text":%q}]`, body))
+	now := time.Now().UTC()
+	tpl := &model.WhatsAppTemplate{
+		SystemID:           conn.SystemID,
+		TenantID:           conn.TenantID,
+		ConnectionID:       conn.ID,
+		WabaID:             conn.WabaID,
+		MetaID:             "meta-tpl-" + name + "-" + language,
+		Name:               name,
+		Language:           language,
+		Category:           "UTILITY",
+		Status:             model.TemplateStatusApproved,
+		ComponentsJSON:     components,
+		ExpectedBodyParams: expectedBodyParams,
+		SyncedAt:           &now,
+	}
+	if err := repository.NewPostgresRepository(qaDB).UpsertWhatsAppTemplate(context.Background(), tpl); err != nil {
+		t.Fatalf("seed template %s: %v", name, err)
+	}
 }
 
 // ----------------------------------------------------------------------------

@@ -445,8 +445,11 @@ O painel admin exibe o mesmo agrupamento em **Volume de Disparos por Aplicação
 | `GET` | `/v1/messages/{meta_message_id}/status` | `X-API-Key` | Histórico de status de entrega (scoped) |
 | `POST` | `/v1/channels` | `X-API-Key` | Cadastra canal WhatsApp para um cliente externo |
 | `POST` | `/v1/embedded-signup/state` | `X-API-Key` | Emite o state OAuth assinado single-use do Embedded Signup |
-| `POST` | `/v1/templates` | `X-API-Key` | Cria template na Meta (WABA global) |
-| `GET` | `/v1/templates` | `X-API-Key` | Lista status dos templates |
+| `POST` | `/v1/templates` | `X-API-Key` | Cria template na Meta e upsert local `PENDING` |
+| `POST` | `/v1/templates/sync` | `X-API-Key` | Sync Graph → catálogo local (`tenant_id`) |
+| `GET` | `/v1/templates` | `X-API-Key` | Lista catálogo local (`?tenant_id=`) |
+| `GET` | `/v1/templates/{name}` | `X-API-Key` | Detalhe local (`?tenant_id=&language=`) |
+| `POST` | `/admin/templates/sync` | JWT (cookie) | Sync admin (`system_id` + `tenant_id`) |
 | `GET` | `/v1/usage/report` | `X-API-Key` | Relatório de volume mensal por cliente externo |
 | `GET` | `/health` | — | Health check |
 | `GET` | `/login` | — | Painel administrativo |
@@ -454,8 +457,9 @@ O painel admin exibe o mesmo agrupamento em **Volume de Disparos por Aplicação
 | `POST` | `/admin/delivery-events/{id}/reprocess` | JWT (cookie) | Reenvia evento de status em DLQ |
 | `GET` | `/admin/usage/volume` | JWT (cookie) | Fragmento HTML de volume (HTMX) |
 | `GET/POST` | `/webhooks/meta/{phone_number_id}` | Meta | Webhook inbound da Meta |
-| `GET/POST` | `/webhook/whatsapp` | Meta | Webhook unificado (status + inbound) |
+| `GET/POST` | `/webhook/whatsapp` | Meta | Webhook unificado (status + inbound + template management) |
 
+Envio de template (`/send-notification`, `/v1/messages/send-template`) valida o catálogo local **antes** da Graph: `422` com `code` `template_not_found` | `template_not_approved` | `param_mismatch`.
 ---
 
 ## 6. Checklist de integração

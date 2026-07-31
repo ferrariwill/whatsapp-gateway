@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -98,13 +99,42 @@ type MessageTemplateButton struct {
 	Text string `json:"text"`
 }
 
-// MetaTemplateResponse expõe apenas metadados públicos de um template da Meta.
+// MetaTemplateResponse expõe metadados + components de um template da Meta.
 type MetaTemplateResponse struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	Category string `json:"category"`
-	Language string `json:"language"`
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	Status       string          `json:"status"`
+	Category     string          `json:"category"`
+	Language     string          `json:"language"`
+	Components   json.RawMessage `json:"components,omitempty"`
+	QualityScore string          `json:"quality_score,omitempty"`
+}
+
+// MetaAPIError representa falha tipada da Graph API (sync grava sem apagar catálogo).
+type MetaAPIError struct {
+	Status  int
+	Code    int
+	Message string
+}
+
+func (e *MetaAPIError) Error() string {
+	if e == nil {
+		return "meta api error"
+	}
+	if e.Code != 0 {
+		return fmt.Sprintf("meta api error (status %d, code %d): %s", e.Status, e.Code, e.Message)
+	}
+	return fmt.Sprintf("meta api error (status %d): %s", e.Status, e.Message)
+}
+
+func AsMetaAPIError(err error) (*MetaAPIError, bool) {
+	if err == nil {
+		return nil, false
+	}
+	if me, ok := err.(*MetaAPIError); ok {
+		return me, true
+	}
+	return nil, false
 }
 
 type createMessageTemplateResponse struct {
@@ -120,12 +150,17 @@ type sendMessageResponse struct {
 
 type listMessageTemplatesResponse struct {
 	Data []struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Status   string `json:"status"`
-		Category string `json:"category"`
-		Language string `json:"language"`
+		ID           string          `json:"id"`
+		Name         string          `json:"name"`
+		Status       string          `json:"status"`
+		Category     string          `json:"category"`
+		Language     string          `json:"language"`
+		Components   json.RawMessage `json:"components"`
+		QualityScore json.RawMessage `json:"quality_score"`
 	} `json:"data"`
+	Paging struct {
+		Next string `json:"next"`
+	} `json:"paging"`
 }
 
 type metaErrorResponse struct {
@@ -154,6 +189,10 @@ func QuickReplyButton(index int, payload string) TemplateComponent {
 			{Type: "payload", Payload: payload},
 		},
 	}
+}
+
+func BuildCreateTemplateComponents(textBody string, buttons []string) []MessageTemplateCreateComponent {
+	return buildCreateTemplateComponents(textBody, buttons)
 }
 
 func buildCreateTemplateComponents(textBody string, buttons []string) []MessageTemplateCreateComponent {
@@ -233,24 +272,57 @@ func (p *MetaProvider) GetTemplatesStatus(
 		return nil, fmt.Errorf("waba id is required")
 	}
 
-	respBody, err := p.doMetaRequest(ctx, accessToken, http.MethodGet, p.messageTemplatesURL(wabaID), nil)
-	if err != nil {
-		return nil, err
-	}
+	nextURL := p.messageTemplatesURL(wabaID) +
+		"?fields=" + url.QueryEscape("id,name,status,category,language,components,quality_score") +
+		"&limit=100"
 
-	var listed listMessageTemplatesResponse
-	if err := json.Unmarshal(respBody, &listed); err != nil {
-		return nil, fmt.Errorf("decode list templates response: %w", err)
-	}
+	templates := make([]MetaTemplateResponse, 0)
+	for nextURL != "" {
+		respBody, err := p.doMetaRequest(ctx, accessToken, http.MethodGet, nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
 
-	templates := make([]MetaTemplateResponse, 0, len(listed.Data))
-	for _, item := range listed.Data {
-		templates = append(templates, MetaTemplateResponse{
-			ID: item.ID, Name: item.Name, Status: item.Status,
-			Category: item.Category, Language: item.Language,
-		})
+		var listed listMessageTemplatesResponse
+		if err := json.Unmarshal(respBody, &listed); err != nil {
+			return nil, fmt.Errorf("decode list templates response: %w", err)
+		}
+
+		for _, item := range listed.Data {
+			templates = append(templates, MetaTemplateResponse{
+				ID:           item.ID,
+				Name:         item.Name,
+				Status:       item.Status,
+				Category:     item.Category,
+				Language:     item.Language,
+				Components:   item.Components,
+				QualityScore: parseQualityScore(item.QualityScore),
+			})
+		}
+
+		nextURL = strings.TrimSpace(listed.Paging.Next)
+		if nextURL != "" && !strings.HasPrefix(nextURL, "https://") && !strings.HasPrefix(nextURL, "http://") {
+			nextURL = ""
+		}
 	}
 	return templates, nil
+}
+
+func parseQualityScore(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return strings.TrimSpace(asString)
+	}
+	var asObj struct {
+		Score string `json:"score"`
+	}
+	if err := json.Unmarshal(raw, &asObj); err == nil {
+		return strings.TrimSpace(asObj.Score)
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 // SendPlainTemplate envia template sem componentes dinâmicos (ex.: hello_world).
@@ -492,7 +564,15 @@ func (p *MetaProvider) doMetaRequest(ctx context.Context, accessToken, method, u
 func parseMetaHTTPError(statusCode int, body []byte) error {
 	var metaErr metaErrorResponse
 	if err := json.Unmarshal(body, &metaErr); err == nil && metaErr.Error.Message != "" {
-		return fmt.Errorf("meta api error (status %d, code %d): %s", statusCode, metaErr.Error.Code, metaErr.Error.Message)
+		return &MetaAPIError{
+			Status:  statusCode,
+			Code:    metaErr.Error.Code,
+			Message: metaErr.Error.Message,
+		}
 	}
-	return fmt.Errorf("meta api error (status %d): %s", statusCode, strings.TrimSpace(string(body)))
+	msg := strings.TrimSpace(string(body))
+	if msg == "" {
+		msg = http.StatusText(statusCode)
+	}
+	return &MetaAPIError{Status: statusCode, Message: msg}
 }

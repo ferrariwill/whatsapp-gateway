@@ -593,6 +593,7 @@ func TestQAWebhookDeliveryStatusUpdatesBilling(t *testing.T) {
 		"tenant_id":     "salao-1",
 		"phone_number":  "5511988887777",
 		"template_name": "confirma_agendamento",
+		"variables":     []string{"Ana", "10:00"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("send status = %d (body=%s)", rec.Code, rec.Body.String())
@@ -668,6 +669,7 @@ func TestQAWebhookDeliveryStatusIsNotScopedToConnection(t *testing.T) {
 		"tenant_id":     "salao-1",
 		"phone_number":  "5511988887777",
 		"template_name": "confirma_agendamento",
+		"variables":     []string{"Ana", "10:00"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("send status = %d (body=%s)", rec.Code, rec.Body.String())

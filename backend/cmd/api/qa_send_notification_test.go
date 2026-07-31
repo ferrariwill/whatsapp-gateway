@@ -290,7 +290,7 @@ func TestQASendNotificationMetaFailuresAreAudited(t *testing.T) {
 				"tenant_id":     "tenant-1",
 				"phone_number":  "5511988887777",
 				"template_name": "confirma_agendamento",
-				"variables":     []string{"Ana"},
+				"variables":     []string{"Ana", "10:00"},
 			})
 
 			if rec.Code != http.StatusBadGateway {
@@ -345,6 +345,7 @@ func TestQASendNotificationSpamSuspensionIsolatesTenants(t *testing.T) {
 			"tenant_id":     tenantID,
 			"phone_number":  "5511988887777",
 			"template_name": "confirma_agendamento",
+			"variables":     []string{"Ana", "10:00"},
 		}
 	}
 
@@ -604,6 +605,7 @@ func TestQASendNotificationEnforcesMonthlyLimit(t *testing.T) {
 			"phone_number":   "5511988887777",
 			"appointment_id": fmt.Sprintf("appt-%d", i),
 			"template_name":  "confirma_agendamento",
+			"variables":      []string{"Ana", "10:00"},
 		})
 		switch rec.Code {
 		case http.StatusOK:

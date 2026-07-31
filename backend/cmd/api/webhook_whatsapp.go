@@ -34,6 +34,8 @@ type saasWebhookPayload struct {
 type unifiedMetaWebhookPayload struct {
 	Object string `json:"object"`
 	Entry  []struct {
+		ID      string `json:"id"`
+		Time    int64  `json:"time"`
 		Changes []struct {
 			Field string `json:"field"`
 			Value struct {
@@ -86,9 +88,23 @@ func (s *server) handleWhatsAppWebhookEvent(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	hasTemplateMgmt := payloadHasTemplateManagement(payload)
 	phoneNumberID := extractPhoneNumberIDFromPayload(payload)
+
+	// Webhooks de gestão de template frequentemente não trazem phone_number_id.
 	if phoneNumberID == "" {
-		log.Printf("webhook whatsapp: phone_number_id not found in payload")
+		if hasTemplateMgmt {
+			raw := append([]byte(nil), body...)
+			if err := s.relay.Submit(func(taskCtx context.Context) {
+				s.processTemplateManagementRaw(taskCtx, raw)
+			}); err != nil {
+				log.Printf("webhook whatsapp: rejecting template management event: %v", err)
+				http.Error(w, "gateway busy, retry later", http.StatusServiceUnavailable)
+				return
+			}
+		} else {
+			log.Printf("webhook whatsapp: phone_number_id not found in payload")
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 		return
@@ -107,10 +123,11 @@ func (s *server) handleWhatsAppWebhookEvent(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Processamento assíncrono: status de entrega + repasse ao SaaS. A admissão
-	// no pool acontece antes do 200 para que uma rajada além da capacidade vire
-	// 503 (Meta reentrega) em vez de goroutines sem limite.
+	raw := append([]byte(nil), body...)
 	if err := s.relay.Submit(func(taskCtx context.Context) {
+		if hasTemplateMgmt {
+			s.processTemplateManagementRaw(taskCtx, raw)
+		}
 		s.processWebhookPayloadAsync(taskCtx, conn, payload)
 	}); err != nil {
 		log.Printf("webhook whatsapp: rejecting event for phone_number_id %s: %v", phoneNumberID, err)
