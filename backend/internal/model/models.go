@@ -26,7 +26,7 @@ type WhatsAppConnection struct {
 	WhatsAppPhoneNumber string    `json:"whatsapp_phone_number,omitempty" db:"whatsapp_phone_number"`
 	Status              string    `json:"status" db:"status"`
 	CreatedAt           time.Time `json:"created_at" db:"created_at"`
-	// Auditoria do catálogo de templates (migration 000017).
+	// Auditoria do catálogo de templates (migration 000018).
 	TemplatesSyncedAt  *time.Time `json:"templates_synced_at,omitempty" db:"templates_synced_at"`
 	TemplatesSyncError string     `json:"templates_sync_error,omitempty" db:"templates_sync_error"`
 	TemplatesSyncedBy  string     `json:"templates_synced_by,omitempty" db:"templates_synced_by"`
