@@ -23,6 +23,8 @@ import (
 
 	"strings"
 
+	"sync"
+
 	"syscall"
 
 	"time"
@@ -72,6 +74,9 @@ type server struct {
 	usage *service.UsageService
 
 	rateLimiter *security.RateLimiter
+
+	tokenBucket    *security.TokenBucketLimiter
+	rateLimitCache *sync.Map
 
 	// relay limita a concorrência do processamento inbound e permite drenar os
 	// repasses em voo no shutdown. Nil volta ao comportamento de uma goroutine
@@ -218,6 +223,10 @@ func main() {
 
 		rateLimiter: security.NewRateLimiterFromEnv(),
 
+		tokenBucket: security.NewTokenBucketLimiter(),
+
+		rateLimitCache: &sync.Map{},
+
 		relay: newRelayPool(relayPoolConfigFromEnv()),
 
 		rejectionLog: newLogSampler(envDuration("WEBHOOK_REJECTION_LOG_INTERVAL", defaultRejectionLogInterval)),
@@ -253,6 +262,8 @@ func main() {
 	mux.Handle("POST /admin/connections/{id}", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUpdateConnection)))
 	mux.Handle("POST /admin/connections/{id}/delete", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminDeleteConnection)))
 	mux.Handle("POST /admin/connections/{id}/unblock", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUnblockConnection)))
+	mux.Handle("GET /admin/connections/{id}/rate-limit", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminGetConnectionRateLimit)))
+	mux.Handle("POST /admin/connections/{id}/rate-limit", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminSetConnectionRateLimit)))
 
 	mux.Handle("GET /admin/usage/volume", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUsageVolume)))
 	mux.Handle("GET /admin/audit/logs", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminAuditLogs)))
@@ -274,6 +285,7 @@ func main() {
 	mux.Handle("POST /v1/channels", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleCreateChannel)))
 
 	mux.Handle("POST /v1/messages/send-template", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendTemplate)))
+	mux.Handle("POST /v1/messages/send-text", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendText)))
 
 	mux.Handle("POST /v1/templates/sync", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSyncTemplates)))
 	mux.Handle("POST /v1/templates", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleCreateTemplate)))
@@ -325,6 +337,16 @@ func main() {
 		defer close(statusSweeperDone)
 
 		srv.runStatusCallbackSweeper(sweepCtx, statusSweepConfigFromEnv())
+
+	}()
+
+	outboundSweeperDone := make(chan struct{})
+
+	go func() {
+
+		defer close(outboundSweeperDone)
+
+		srv.runOutboundRetrySweeper(sweepCtx)
 
 	}()
 
@@ -396,6 +418,8 @@ func main() {
 	<-sweeperDone
 
 	<-statusSweeperDone
+
+	<-outboundSweeperDone
 
 	<-nonceGCDone
 
@@ -923,6 +947,11 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.ensureThrottleFields()
+	if !s.enforceCommercialThrottle(w, r, conn) {
+		return
+	}
+
 	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 
 	metaMessageID, sendErr := metaProvider.SendAppointmentTemplate(
@@ -982,6 +1011,12 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sendErr != nil {
+
+		s.maybeEnqueueOutboundRetry(r.Context(), conn, messageLog, model.OutboundRetryKindTemplate, map[string]any{
+			"phone_number":  req.PhoneNumber,
+			"template_name": req.TemplateName,
+			"variables":     req.Variables,
+		}, sendErr)
 
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: sendErr.Error()})
 

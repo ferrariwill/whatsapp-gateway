@@ -131,6 +131,11 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	s.ensureThrottleFields()
+	if !s.enforceCommercialThrottle(w, r, conn) {
+		return
+	}
+
 	language := strings.TrimSpace(req.LanguageCode)
 	if language == "" {
 		language = defaultTemplateLanguage
@@ -197,6 +202,17 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if sendErr != nil {
+		kind := model.OutboundRetryKindTemplate
+		payload := map[string]any{
+			"phone_number":  req.PhoneNumber,
+			"template_name": req.TemplateName,
+			"variables":     req.Variables,
+		}
+		if req.SimpleTemplate {
+			kind = model.OutboundRetryKindPlainTemplate
+			payload["language_code"] = req.LanguageCode
+		}
+		s.maybeEnqueueOutboundRetry(r.Context(), conn, messageLog, kind, payload, sendErr)
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: sendErr.Error()})
 		return
 	}
@@ -217,5 +233,5 @@ func (s *server) notifySpamForConnection(conn *model.WhatsAppConnection, count i
 		"ALERTA SPAM: %s/%s — %d msgs/min",
 		conn.SistemaOrigem, conn.TenantID, count,
 	)
-	_ = meta.SendTextMessage(context.Background(), conn.AccessToken, conn.PhoneNumberID, adminPhone, body)
+	_, _ = meta.SendTextMessage(context.Background(), conn.AccessToken, conn.PhoneNumberID, adminPhone, body)
 }

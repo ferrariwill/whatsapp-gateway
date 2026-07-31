@@ -246,9 +246,7 @@ func (r *PostgresRepository) UpdateConnectionTemplateSyncAudit(
 func (r *PostgresRepository) FindConnectionsByWabaID(
 	ctx context.Context, wabaID string,
 ) ([]model.WhatsAppConnection, error) {
-	const query = `
-		SELECT id, system_id, sistema_origem, tenant_id, waba_id, phone_number_id,
-		       access_token, webhook_url, whatsapp_phone_number, status, created_at
+	query := `SELECT ` + connectionColumns + `
 		FROM whatsapp_connections
 		WHERE waba_id = $1
 	`

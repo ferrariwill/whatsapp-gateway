@@ -440,22 +440,22 @@ func (p *MetaProvider) SendAppointmentTemplate(
 }
 
 // SendTextMessage envia mensagem de texto livre com o token do tenant.
-func (p *MetaProvider) SendTextMessage(ctx context.Context, accessToken, phoneNumberID, to, body string) error {
+func (p *MetaProvider) SendTextMessage(ctx context.Context, accessToken, phoneNumberID, to, body string) (string, error) {
 	accessToken = strings.TrimSpace(accessToken)
 	phoneNumberID = strings.TrimSpace(phoneNumberID)
 	to = strings.TrimSpace(to)
 	body = strings.TrimSpace(body)
 	if accessToken == "" {
-		return fmt.Errorf("access token is required")
+		return "", fmt.Errorf("access token is required")
 	}
 	if phoneNumberID == "" {
-		return fmt.Errorf("phone number id is required")
+		return "", fmt.Errorf("phone number id is required")
 	}
 	if to == "" {
-		return fmt.Errorf("recipient phone number is required")
+		return "", fmt.Errorf("recipient phone number is required")
 	}
 	if body == "" {
-		return fmt.Errorf("message body is required")
+		return "", fmt.Errorf("message body is required")
 	}
 
 	payload := map[string]any{
@@ -470,11 +470,21 @@ func (p *MetaProvider) SendTextMessage(ctx context.Context, accessToken, phoneNu
 
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal text payload: %w", err)
+		return "", fmt.Errorf("marshal text payload: %w", err)
 	}
 
-	_, err = p.doMetaRequest(ctx, accessToken, http.MethodPost, p.messagesURL(phoneNumberID), bodyBytes)
-	return err
+	respBody, err := p.doMetaRequest(ctx, accessToken, http.MethodPost, p.messagesURL(phoneNumberID), bodyBytes)
+	if err != nil {
+		return "", err
+	}
+	var sent sendMessageResponse
+	if err := json.Unmarshal(respBody, &sent); err != nil {
+		return "", fmt.Errorf("decode send message response: %w", err)
+	}
+	if len(sent.Messages) == 0 || strings.TrimSpace(sent.Messages[0].ID) == "" {
+		return "", fmt.Errorf("meta api returned empty message id")
+	}
+	return strings.TrimSpace(sent.Messages[0].ID), nil
 }
 
 // SendUtilityTemplate envia template utility com token do tenant.
