@@ -146,7 +146,7 @@ func requireQADB(t *testing.T) {
 
 func resetQAData(t *testing.T) {
 	t.Helper()
-	_, err := qaDB.Exec(`TRUNCATE message_logs, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
+	_, err := qaDB.Exec(`TRUNCATE message_delivery_events, message_logs, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset qa data: %v", err)
 	}
@@ -357,6 +357,7 @@ func createQAConnection(
 		PhoneNumberID:       phoneNumberID,
 		AccessToken:         accessToken,
 		WebhookURL:          webhookURL,
+		WebhookSecret:       "qa-webhook-secret-" + tenantID,
 		WhatsAppPhoneNumber: "5511" + phoneNumberID,
 		Status:              model.ConnectionStatusActive,
 	}

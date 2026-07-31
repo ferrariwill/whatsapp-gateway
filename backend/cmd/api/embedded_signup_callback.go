@@ -125,6 +125,13 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 		webhookURL = saasWebhookURLForSistema(system.Slug)
 	}
 
+	secret, err := generateWebhookSecret()
+	if err != nil {
+		log.Printf("embedded signup generate webhook_secret %s/%s: %v", slug, tenantID, err)
+		writeEmbeddedSignupResult(w, r, http.StatusInternalServerError, false, "falha ao gerar webhook_secret", err.Error())
+		return
+	}
+
 	conn := &model.WhatsAppConnection{
 		SystemID:            system.ID,
 		SistemaOrigem:       system.Slug,
@@ -133,6 +140,7 @@ func (s *server) handleEmbeddedSignupCallback(w http.ResponseWriter, r *http.Req
 		PhoneNumberID:       assets.PhoneNumberID,
 		AccessToken:         assets.AccessToken,
 		WebhookURL:          webhookURL,
+		WebhookSecret:       secret,
 		WhatsAppPhoneNumber: assets.WhatsAppPhoneNumber,
 		Status:              model.ConnectionStatusActive,
 	}

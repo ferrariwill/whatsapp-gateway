@@ -36,7 +36,17 @@ func VerifyMetaSignature(appSecret string, body []byte, signatureHeader string) 
 // SignMetaPayload gera o valor completo do header X-Hub-Signature-256 para testes
 // e stubs que precisam imitar a Meta.
 func SignMetaPayload(appSecret string, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(appSecret))
+	return SignHMACSHA256Hex(appSecret, body)
+}
+
+// SignHMACSHA256Hex gera o valor `sha256=<hex>` (mesmo formato Meta / Gateway outbound).
+func SignHMACSHA256Hex(secret string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write(body)
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifyHMACSHA256Hex valida um header no formato `sha256=<hex>` com comparação constant-time.
+func VerifyHMACSHA256Hex(secret string, body []byte, signatureHeader string) bool {
+	return VerifyMetaSignature(secret, body, signatureHeader)
 }

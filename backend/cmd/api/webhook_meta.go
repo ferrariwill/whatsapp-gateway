@@ -29,10 +29,11 @@ type outboundWebhookPayload struct {
 }
 
 type metaMessageStatus struct {
-	ID          string `json:"id"`
-	Status      string `json:"status"`
-	Timestamp   string `json:"timestamp"`
-	RecipientID string `json:"recipient_id"`
+	ID          string            `json:"id"`
+	Status      string            `json:"status"`
+	Timestamp   string            `json:"timestamp"`
+	RecipientID string            `json:"recipient_id"`
+	Errors      []json.RawMessage `json:"errors"`
 	Pricing     *struct {
 		Billable     bool   `json:"billable"`
 		PricingModel string `json:"pricing_model"`
@@ -177,6 +178,7 @@ func (s *server) processLegacyMetaWebhookAsync(
 		connectionID = conn.ID
 		sistemaOrigem = conn.SistemaOrigem
 		s.processDeliveryStatusesFromPayload(ctx, conn, payload)
+		s.processStatusFanOut(ctx, conn, payload)
 	}
 
 	targetURL := strings.TrimSpace(channel.WebhookURL)

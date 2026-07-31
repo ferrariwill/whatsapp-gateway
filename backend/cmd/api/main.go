@@ -339,6 +339,10 @@ func main() {
 
 	mux.Handle("GET /v1/usage/report", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleUsageReport)))
 
+	mux.Handle("GET /v1/messages/{meta_message_id}/status", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetMessageStatus)))
+
+	mux.Handle("POST /admin/delivery-events/{id}/reprocess", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminReprocessDeliveryEvent)))
+
 
 
 	addr := envOrDefault("PORT", "8080")
@@ -372,6 +376,16 @@ func main() {
 		defer close(sweeperDone)
 
 		srv.runPendingSweeper(sweepCtx, pendingSweepConfigFromEnv())
+
+	}()
+
+	statusSweeperDone := make(chan struct{})
+
+	go func() {
+
+		defer close(statusSweeperDone)
+
+		srv.runStatusCallbackSweeper(sweepCtx, statusSweepConfigFromEnv())
 
 	}()
 
@@ -431,6 +445,8 @@ func main() {
 	stopSweeper()
 
 	<-sweeperDone
+
+	<-statusSweeperDone
 
 	log.Printf("WhatsApp Gateway stopped")
 

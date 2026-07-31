@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -11,6 +13,21 @@ import (
 	"github.com/whatsappgetway/gateway/internal/model"
 	"github.com/whatsappgetway/gateway/internal/repository"
 )
+
+func generateWebhookSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func ensureWebhookSecret(existing string) (string, error) {
+	if strings.TrimSpace(existing) != "" {
+		return existing, nil
+	}
+	return generateWebhookSecret()
+}
 
 func (s *server) handleAdminCreateConnection(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminUser(w, r) {
@@ -33,6 +50,12 @@ func (s *server) handleAdminCreateConnection(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	secret, err := ensureWebhookSecret(strings.TrimSpace(r.FormValue("webhook_secret")))
+	if err != nil {
+		respondConnectionFormError(w, r, "erro ao gerar webhook_secret")
+		return
+	}
+
 	conn := &model.WhatsAppConnection{
 		SystemID:            system.ID,
 		SistemaOrigem:       system.Slug,
@@ -41,6 +64,7 @@ func (s *server) handleAdminCreateConnection(w http.ResponseWriter, r *http.Requ
 		PhoneNumberID:       strings.TrimSpace(r.FormValue("phone_number_id")),
 		AccessToken:         strings.TrimSpace(r.FormValue("access_token")),
 		WebhookURL:          strings.TrimSpace(r.FormValue("webhook_url")),
+		WebhookSecret:       secret,
 		WhatsAppPhoneNumber: strings.TrimSpace(r.FormValue("whatsapp_phone_number")),
 	}
 
@@ -88,6 +112,25 @@ func (s *server) handleAdminUpdateConnection(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	existing, err := s.repo.FindConnectionByID(r.Context(), connID)
+	if err != nil {
+		respondFormFeedback(w, r, "edit-connection-form-feedback", "conexão não encontrada")
+		return
+	}
+
+	secret := strings.TrimSpace(r.FormValue("webhook_secret"))
+	if secret == "" {
+		secret = existing.WebhookSecret
+	}
+	if secret == "" {
+		generated, genErr := generateWebhookSecret()
+		if genErr != nil {
+			respondFormFeedback(w, r, "edit-connection-form-feedback", "erro ao gerar webhook_secret")
+			return
+		}
+		secret = generated
+	}
+
 	conn := &model.WhatsAppConnection{
 		ID:                  connID,
 		SystemID:            system.ID,
@@ -97,6 +140,7 @@ func (s *server) handleAdminUpdateConnection(w http.ResponseWriter, r *http.Requ
 		PhoneNumberID:       strings.TrimSpace(r.FormValue("phone_number_id")),
 		AccessToken:         strings.TrimSpace(r.FormValue("access_token")),
 		WebhookURL:          strings.TrimSpace(r.FormValue("webhook_url")),
+		WebhookSecret:       secret,
 		WhatsAppPhoneNumber: strings.TrimSpace(r.FormValue("whatsapp_phone_number")),
 	}
 
@@ -106,11 +150,6 @@ func (s *server) handleAdminUpdateConnection(w http.ResponseWriter, r *http.Requ
 	}
 
 	if conn.AccessToken == "" {
-		existing, err := s.repo.FindConnectionByID(r.Context(), connID)
-		if err != nil {
-			respondFormFeedback(w, r, "edit-connection-form-feedback", "conexão não encontrada")
-			return
-		}
 		conn.AccessToken = existing.AccessToken
 	}
 
