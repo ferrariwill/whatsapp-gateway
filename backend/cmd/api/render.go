@@ -305,8 +305,8 @@ func systemAPIKeyRevealHTML(apiKey string) string {
 		`<div id="system-api-key-reveal" hx-swap-oob="innerHTML" class="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4">`+
 			`<p class="text-sm font-semibold text-amber-200">Chave de API gerada — copie agora, ela não será exibida novamente:</p>`+
 			`<div class="mt-2 flex flex-wrap items-center gap-2">`+
-			`<code class="flex-1 rounded-lg bg-slate-950 px-3 py-2 font-mono text-xs text-emerald-300">%s</code>`+
-			`<button type="button" data-copy="%s" onclick="copyToClipboard(this)" class="rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400">Copiar</button>`+
+			`<code class="min-w-0 flex-1 rounded-lg bg-slate-950 px-3 py-2 font-mono text-xs text-emerald-300 break-all">%s</code>`+
+			`<button type="button" data-copy="%s" onclick="copyToClipboard(this)" class="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Copiar</button>`+
 			`</div></div>`,
 		template.HTMLEscapeString(apiKey),
 		template.HTMLEscapeString(apiKey),
@@ -524,8 +524,53 @@ func buildUsageVolumeView(reports []service.ExternalClientUsageReport, month, ye
 func renderUsageVolumePartial(w http.ResponseWriter, tpl *template.Template, data usageVolumeView) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tpl.ExecuteTemplate(w, "usage_volume.html", data); err != nil {
-		_, _ = w.Write([]byte(`<p class="text-sm text-red-300">Erro ao renderizar volume de disparos.</p>`))
+		_, _ = w.Write([]byte(usageVolumeErrorHTML("Erro ao renderizar volume de disparos.")))
 	}
+}
+
+func usageVolumeErrorHTML(message string) string {
+	return fmt.Sprintf(
+		`<div class="rounded-xl border border-red-500/30 bg-red-500/10 p-4" role="alert">`+
+			`<p class="text-sm text-red-200">%s</p>`+
+			`<button type="button"`+
+			` class="mt-3 inline-flex min-h-[44px] items-center justify-center rounded-xl border border-slate-700 bg-slate-950 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"`+
+			` hx-get="/admin/usage/volume"`+
+			` hx-include="#usage-filter-form"`+
+			` hx-target="#usage-volume-card"`+
+			` hx-swap="innerHTML"`+
+			` hx-indicator="#usage-volume-loading">Tentar novamente</button>`+
+			`</div>`,
+		template.HTMLEscapeString(message),
+	)
+}
+
+func writeUsageVolumeError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(usageVolumeErrorHTML(message)))
+}
+
+func writeDashboardLoadError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Erro — WhatsApp Gateway</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-full bg-slate-950 text-slate-100 antialiased">
+  <main class="mx-auto flex min-h-screen max-w-lg flex-col items-center justify-center px-4 text-center">
+    <div class="w-full rounded-2xl border border-red-500/30 bg-red-500/10 p-6" role="alert">
+      <h1 class="text-lg font-semibold text-red-100">Não foi possível carregar o painel</h1>
+      <p class="mt-2 text-sm text-red-200/90">%s</p>
+      <a href="/dashboard" class="mt-4 inline-flex min-h-[44px] items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Tentar novamente</a>
+    </div>
+  </main>
+</body>
+</html>`, template.HTMLEscapeString(message))
 }
 
 func formatMoney(value float64) string {

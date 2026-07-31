@@ -551,7 +551,7 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 	systems, err := s.repo.ListSystems(r.Context())
 	if err != nil {
 		log.Printf("list systems: %v", err)
-		http.Error(w, "failed to load systems", http.StatusInternalServerError)
+		writeDashboardLoadError(w, http.StatusInternalServerError, "Falha ao carregar aplicações.")
 		return
 	}
 
@@ -561,7 +561,7 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 
 		log.Printf("list client channels: %v", err)
 
-		http.Error(w, "failed to load channels", http.StatusInternalServerError)
+		writeDashboardLoadError(w, http.StatusInternalServerError, "Falha ao carregar canais.")
 
 		return
 
@@ -570,7 +570,7 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 	connections, err := s.repo.ListWhatsAppConnections(r.Context())
 	if err != nil {
 		log.Printf("list whatsapp connections: %v", err)
-		http.Error(w, "failed to load connections", http.StatusInternalServerError)
+		writeDashboardLoadError(w, http.StatusInternalServerError, "Falha ao carregar conexões.")
 		return
 	}
 
@@ -580,7 +580,7 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 
 		log.Printf("list message logs: %v", err)
 
-		http.Error(w, "failed to load message logs", http.StatusInternalServerError)
+		writeDashboardLoadError(w, http.StatusInternalServerError, "Falha ao carregar histórico de mensagens.")
 
 		return
 

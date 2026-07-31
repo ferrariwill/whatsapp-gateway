@@ -4,7 +4,52 @@
 <title>{{if .Title}}{{.Title}}{{else}}WhatsApp Gateway{{end}}</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<style>
+  .htmx-indicator { display: none; }
+  .htmx-request .htmx-indicator { display: block; }
+  .htmx-request.htmx-indicator { display: block; }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+</style>
 <script>
+  let activeModalId = null;
+  let lastFocusEl = null;
+
+  function showToast(message, kind) {
+    const region = document.getElementById('admin-toast');
+    if (!region) return;
+    const el = document.createElement('div');
+    const isError = kind === 'error';
+    el.setAttribute('role', 'status');
+    el.className = isError
+      ? 'pointer-events-auto rounded-xl border border-red-500/40 bg-red-950/95 px-4 py-3 text-sm text-red-100 shadow-lg'
+      : 'pointer-events-auto rounded-xl border border-emerald-500/40 bg-emerald-950/95 px-4 py-3 text-sm text-emerald-100 shadow-lg';
+    el.textContent = message;
+    region.replaceChildren(el);
+    window.clearTimeout(region._toastTimer);
+    region._toastTimer = window.setTimeout(function () {
+      if (el.parentNode === region) el.remove();
+    }, 3500);
+  }
+
+  function announceCopy(message) {
+    const live = document.getElementById('copy-announce');
+    if (live) {
+      live.textContent = '';
+      window.setTimeout(function () { live.textContent = message; }, 10);
+    }
+    showToast(message, 'success');
+  }
+
   function copyToClipboard(button) {
     const value = button.getAttribute('data-copy');
     if (!value) return;
@@ -12,10 +57,13 @@
       const original = button.textContent;
       button.textContent = 'Copiado!';
       button.classList.add('bg-emerald-600');
+      announceCopy('Copiado');
       setTimeout(function () {
         button.textContent = original;
         button.classList.remove('bg-emerald-600');
       }, 1500);
+    }).catch(function () {
+      showToast('Não foi possível copiar.', 'error');
     });
   }
 
@@ -44,14 +92,15 @@
 
   function removeRowAfterDelete(event, rowId, tbodyId, emptyHtml) {
     if (!event.detail.successful) {
+      showToast('Não foi possível excluir. Tente novamente.', 'error');
       return;
     }
     document.getElementById(rowId)?.remove();
     ensureTableEmptyState(tbodyId, emptyHtml);
+    showToast('Excluído com sucesso.', 'success');
   }
 
-  function openModal(id) {
-    document.getElementById(id).classList.remove('hidden');
+  function clearModalFeedback() {
     document.getElementById('channel-form-feedback')?.replaceChildren();
     document.getElementById('system-form-feedback')?.replaceChildren();
     document.getElementById('connection-form-feedback')?.replaceChildren();
@@ -60,9 +109,90 @@
     document.getElementById('edit-connection-form-feedback')?.replaceChildren();
   }
 
-  function closeModal(id) {
-    document.getElementById(id).classList.add('hidden');
+  function getFocusable(container) {
+    return Array.prototype.slice.call(container.querySelectorAll(
+      'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    ));
   }
+
+  function onModalKeydown(e) {
+    if (!activeModalId) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeModal(activeModalId);
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const modal = document.getElementById(activeModalId);
+    if (!modal || modal.classList.contains('hidden')) return;
+    const panel = modal.querySelector('[data-modal-panel]') || modal;
+    const focusable = getFocusable(panel);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  function openModal(id) {
+    const modal = document.getElementById(id);
+    if (!modal) return;
+    if (activeModalId && activeModalId !== id) {
+      closeModal(activeModalId);
+    }
+    lastFocusEl = document.activeElement;
+    activeModalId = id;
+    clearModalFeedback();
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('overflow-hidden');
+    document.addEventListener('keydown', onModalKeydown);
+    const panel = modal.querySelector('[data-modal-panel]') || modal;
+    const focusTarget = panel.querySelector('input:not([type="hidden"]), select, textarea')
+      || panel.querySelector('button:not([data-modal-close])')
+      || panel;
+    window.setTimeout(function () {
+      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
+    }, 0);
+  }
+
+  function closeModal(id) {
+    const modal = document.getElementById(id);
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+    if (activeModalId === id) {
+      activeModalId = null;
+      document.body.classList.remove('overflow-hidden');
+      document.removeEventListener('keydown', onModalKeydown);
+      if (lastFocusEl && typeof lastFocusEl.focus === 'function') {
+        lastFocusEl.focus();
+      }
+      lastFocusEl = null;
+    }
+  }
+
+  document.addEventListener('click', function (e) {
+    if (!activeModalId) return;
+    const modal = document.getElementById(activeModalId);
+    if (modal && e.target === modal) {
+      closeModal(activeModalId);
+    }
+  });
+
+  document.addEventListener('DOMContentLoaded', function () {
+    document.body.addEventListener('htmx:responseError', function () {
+      showToast('Falha na operação. Tente novamente.', 'error');
+    });
+    document.body.addEventListener('htmx:sendError', function () {
+      showToast('Falha de rede. Verifique a conexão.', 'error');
+    });
+  });
 
   function openEditSystemModal(button) {
     const form = document.getElementById('edit-system-form');

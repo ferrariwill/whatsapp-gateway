@@ -60,14 +60,14 @@ func (s *server) handleAdminUsageVolume(w http.ResponseWriter, r *http.Request) 
 
 	month, year, _, err := parseUsageQuery(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeUsageVolumeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	reports, err := s.usage.GetMonthlyVolumeByApplicationAndClient(r.Context(), month, year)
 	if err != nil {
 		log.Printf("admin usage volume: %v", err)
-		http.Error(w, "failed to load usage volume", http.StatusInternalServerError)
+		writeUsageVolumeError(w, http.StatusInternalServerError, "Falha ao carregar volume de disparos.")
 		return
 	}
 
