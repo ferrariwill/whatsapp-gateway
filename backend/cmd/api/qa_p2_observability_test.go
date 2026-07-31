@@ -117,6 +117,7 @@ func TestQAAdminAuditAPIIncludesRateLimitedReason(t *testing.T) {
 		"tenant_id":     "tenant-a",
 		"phone_number":  "5511988887777",
 		"template_name": "confirma_agendamento",
+		"variables":     []string{"Ana", "10:00"},
 	}
 	if rec := qaPostSendNotification(t, srv, system.APIKey, payload); rec.Code != http.StatusOK {
 		t.Fatalf("accepted status=%d body=%s", rec.Code, rec.Body.String())

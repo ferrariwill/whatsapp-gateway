@@ -6,8 +6,8 @@
 <script src="https://unpkg.com/htmx.org@2.0.4"></script>
 <style>
   .htmx-indicator { display: none; }
-  .htmx-request .htmx-indicator { display: block; }
-  .htmx-request.htmx-indicator { display: block; }
+  .htmx-request .htmx-indicator { display: flex; }
+  .htmx-request.htmx-indicator { display: flex; }
   .sr-only {
     position: absolute;
     width: 1px;
@@ -67,36 +67,36 @@
     });
   }
 
-  function ensureTableEmptyState(tbodyId, emptyHtml) {
-    const tbody = document.getElementById(tbodyId);
-    if (tbody && !tbody.querySelector('tr')) {
-      tbody.innerHTML = emptyHtml;
+  function ensureListEmptyState(listId, emptyHtml) {
+    const list = document.getElementById(listId);
+    if (list && !list.querySelector('[data-entity-row]')) {
+      list.innerHTML = emptyHtml;
     }
   }
 
-  const channelsEmptyRowHtml = '<tr id="channels-empty-row"><td colspan="8" class="px-4 py-8 text-center text-slate-500">Nenhum canal vinculado ainda.</td></tr>';
-  const connectionsEmptyRowHtml = '<tr id="connections-empty-row"><td colspan="10" class="px-4 py-8 text-center text-slate-500">Nenhuma conexão cadastrada. Crie a primeira para habilitar POST /send-notification.</td></tr>';
-  const systemsEmptyRowHtml = '<tr id="systems-empty-row"><td colspan="6" class="px-4 py-8 text-center text-slate-500">Nenhuma aplicação cadastrada. Crie a primeira antes de vincular canais.</td></tr>';
+  const channelsEmptyRowHtml = '<div id="channels-empty-row" class="px-4 py-8 text-center text-sm text-slate-500">Nenhum canal vinculado ainda.</div>';
+  const connectionsEmptyRowHtml = '<div id="connections-empty-row" class="px-4 py-8 text-center text-sm text-slate-500">Nenhuma conexão cadastrada. Crie a primeira para habilitar POST /send-notification.</div>';
+  const systemsEmptyRowHtml = '<div id="systems-empty-row" class="px-4 py-8 text-center text-sm text-slate-500">Nenhuma aplicação cadastrada. Crie a primeira antes de vincular canais.</div>';
 
   function removeConnectionRow(event, rowId) {
-    removeRowAfterDelete(event, rowId, 'connections-tbody', connectionsEmptyRowHtml);
+    removeRowAfterDelete(event, rowId, 'connections-list', connectionsEmptyRowHtml);
   }
 
   function removeChannelRow(event, rowId) {
-    removeRowAfterDelete(event, rowId, 'channels-tbody', channelsEmptyRowHtml);
+    removeRowAfterDelete(event, rowId, 'channels-list', channelsEmptyRowHtml);
   }
 
   function removeSystemRow(event, rowId) {
-    removeRowAfterDelete(event, rowId, 'systems-tbody', systemsEmptyRowHtml);
+    removeRowAfterDelete(event, rowId, 'systems-list', systemsEmptyRowHtml);
   }
 
-  function removeRowAfterDelete(event, rowId, tbodyId, emptyHtml) {
+  function removeRowAfterDelete(event, rowId, listId, emptyHtml) {
     if (!event.detail.successful) {
       // Error toast comes from htmx:responseError — avoid double toast.
       return;
     }
     document.getElementById(rowId)?.remove();
-    ensureTableEmptyState(tbodyId, emptyHtml);
+    ensureListEmptyState(listId, emptyHtml);
     showToast('Excluído com sucesso.', 'success');
   }
 

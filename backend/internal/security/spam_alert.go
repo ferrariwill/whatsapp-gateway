@@ -11,7 +11,7 @@ import (
 
 // TextMessageSender envia mensagens de texto via WhatsApp Cloud API.
 type TextMessageSender interface {
-	SendTextMessage(ctx context.Context, accessToken, phoneNumberID, to, body string) error
+	SendTextMessage(ctx context.Context, accessToken, phoneNumberID, to, body string) (string, error)
 	SendUtilityTemplate(ctx context.Context, accessToken, phoneNumberID, to, templateName string, bodyParams []string) error
 }
 
@@ -63,7 +63,7 @@ func NotifyAdminSpamAlert(ctx context.Context, sender TextMessageSender, systemN
 				fmt.Sprintf("%d", messageCount),
 			})
 		} else {
-			err = sender.SendTextMessage(alertCtx, accessToken, phoneNumberID, adminPhone, body)
+			_, err = sender.SendTextMessage(alertCtx, accessToken, phoneNumberID, adminPhone, body)
 		}
 		if err != nil {
 			log.Printf("admin spam alert to %s failed: %v", adminPhone, err)

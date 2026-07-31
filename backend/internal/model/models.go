@@ -22,9 +22,46 @@ type WhatsAppConnection struct {
 	PhoneNumberID       string    `json:"phone_number_id" db:"phone_number_id"`
 	AccessToken         string    `json:"-" db:"access_token"`
 	WebhookURL          string    `json:"webhook_url,omitempty" db:"webhook_url"`
+	WebhookSecret       string    `json:"-" db:"webhook_secret"` // HMAC outbound; nunca logar
 	WhatsAppPhoneNumber string    `json:"whatsapp_phone_number,omitempty" db:"whatsapp_phone_number"`
 	Status              string    `json:"status" db:"status"`
 	CreatedAt           time.Time `json:"created_at" db:"created_at"`
+	// Auditoria do catálogo de templates (migration 000018).
+	TemplatesSyncedAt  *time.Time `json:"templates_synced_at,omitempty" db:"templates_synced_at"`
+	TemplatesSyncError string     `json:"templates_sync_error,omitempty" db:"templates_sync_error"`
+	TemplatesSyncedBy  string     `json:"templates_synced_by,omitempty" db:"templates_synced_by"`
+	// Rate limit override por tenant (NULL = herda system/env). Migration 000019.
+	RateLimitRPS   *float64 `json:"rate_limit_rps,omitempty" db:"rate_limit_rps"`
+	RateLimitBurst *int     `json:"rate_limit_burst,omitempty" db:"rate_limit_burst"`
+}
+
+// Status possíveis de um template no catálogo local (espelham a Meta em uppercase).
+const (
+	TemplateStatusApproved  = "APPROVED"
+	TemplateStatusPending   = "PENDING"
+	TemplateStatusRejected  = "REJECTED"
+	TemplateStatusPaused    = "PAUSED"
+	TemplateStatusDisabled  = "DISABLED"
+)
+
+// WhatsAppTemplate é a fonte da verdade local após sync com a Graph API.
+type WhatsAppTemplate struct {
+	ID                  string     `json:"id" db:"id"`
+	SystemID            string     `json:"system_id" db:"system_id"`
+	TenantID            string     `json:"tenant_id" db:"tenant_id"`
+	ConnectionID        string     `json:"connection_id,omitempty" db:"connection_id"`
+	WabaID              string     `json:"waba_id" db:"waba_id"`
+	MetaID              string     `json:"meta_id,omitempty" db:"meta_id"`
+	Name                string     `json:"name" db:"name"`
+	Language            string     `json:"language" db:"language"`
+	Category            string     `json:"category,omitempty" db:"category"`
+	Status              string     `json:"status" db:"status"`
+	ComponentsJSON      []byte     `json:"components_json" db:"components_json"`
+	ExpectedBodyParams  int        `json:"expected_body_params" db:"expected_body_params"`
+	QualityScore        string     `json:"quality_score,omitempty" db:"quality_score"`
+	SyncedAt            *time.Time `json:"synced_at,omitempty" db:"synced_at"`
+	CreatedAt           time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 const (
@@ -71,6 +108,46 @@ type System struct {
 	APIKeyHash string    `json:"-" db:"api_key_hash"`
 	WebhookURL string    `json:"webhook_url,omitempty" db:"webhook_url"`
 	CreatedAt  time.Time `json:"created_at" db:"created_at"`
+	// Defaults comerciais de throttle (migration 000019). Preenchidos quando o SELECT os traz.
+	DefaultRateLimitRPS   float64 `json:"default_rate_limit_rps,omitempty" db:"default_rate_limit_rps"`
+	DefaultRateLimitBurst int     `json:"default_rate_limit_burst,omitempty" db:"default_rate_limit_burst"`
+}
+
+// OutboundRetryKind classifica o payload reenviável na DLQ outbound→Meta.
+type OutboundRetryKind string
+
+const (
+	OutboundRetryKindTemplate      OutboundRetryKind = "template"
+	OutboundRetryKindText          OutboundRetryKind = "text"
+	OutboundRetryKindPlainTemplate OutboundRetryKind = "plain_template"
+)
+
+// OutboundRetryStatus é o ciclo de vida da fila outbound_retry_queue.
+type OutboundRetryStatus string
+
+const (
+	OutboundRetryPending   OutboundRetryStatus = "pending"
+	OutboundRetryRelaying  OutboundRetryStatus = "relaying"
+	OutboundRetrySent      OutboundRetryStatus = "sent"
+	OutboundRetryFailed    OutboundRetryStatus = "failed"
+	OutboundRetryExhausted OutboundRetryStatus = "exhausted"
+)
+
+// OutboundRetryQueueItem é um retry assíncrono após Meta 429/5xx (sem busy-loop no request).
+type OutboundRetryQueueItem struct {
+	ID             string              `json:"id" db:"id"`
+	MessageLogID   string              `json:"message_log_id" db:"message_log_id"`
+	SystemID       string              `json:"system_id" db:"system_id"`
+	ConnectionID   string              `json:"connection_id" db:"connection_id"`
+	Kind           OutboundRetryKind   `json:"kind" db:"kind"`
+	PayloadJSON    []byte              `json:"payload_json" db:"payload_json"`
+	Attempts       int                 `json:"attempts" db:"attempts"`
+	NextAttemptAt  time.Time           `json:"next_attempt_at" db:"next_attempt_at"`
+	LastError      string              `json:"last_error,omitempty" db:"last_error"`
+	Status         OutboundRetryStatus `json:"status" db:"status"`
+	SweepClaimedAt *time.Time          `json:"sweep_claimed_at,omitempty" db:"sweep_claimed_at"`
+	CreatedAt      time.Time           `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time           `json:"updated_at" db:"updated_at"`
 }
 
 // User representa um operador do painel web do gateway.
@@ -99,6 +176,48 @@ const (
 	MessageDirectionInbound  MessageDirection = "INBOUND"
 )
 
+// DeliveryStatus é o status normalizado vindo do webhook Meta statuses[].
+type DeliveryStatus string
+
+const (
+	DeliveryStatusSent      DeliveryStatus = "sent"
+	DeliveryStatusDelivered DeliveryStatus = "delivered"
+	DeliveryStatusRead      DeliveryStatus = "read"
+	DeliveryStatusFailed    DeliveryStatus = "failed"
+)
+
+// CallbackStatus é o estado do fan-out HTTP do evento de status ao produto.
+type CallbackStatus string
+
+const (
+	CallbackStatusPending  CallbackStatus = "pending"
+	CallbackStatusRelaying CallbackStatus = "relaying"
+	CallbackStatusSent     CallbackStatus = "sent"
+	CallbackStatusFailed   CallbackStatus = "failed"
+	CallbackStatusDLQ      CallbackStatus = "dlq"
+)
+
+// MessageDeliveryEvent persiste um status Meta + o ciclo de vida do callback ao SaaS.
+type MessageDeliveryEvent struct {
+	ID               string         `json:"id" db:"id"`
+	SystemID         string         `json:"system_id" db:"system_id"`
+	ConnectionID     string         `json:"connection_id" db:"connection_id"`
+	TenantID         string         `json:"tenant_id" db:"tenant_id"`
+	ProductID        string         `json:"product_id" db:"product_id"`
+	MetaMessageID    string         `json:"meta_message_id" db:"meta_message_id"`
+	Recipient        string         `json:"recipient" db:"recipient"`
+	Status           DeliveryStatus `json:"status" db:"status"`
+	MetaTimestamp    time.Time      `json:"meta_timestamp" db:"meta_timestamp"`
+	ErrorsJSON       []byte         `json:"errors_json,omitempty" db:"errors_json"`
+	CallbackStatus   CallbackStatus `json:"callback_status" db:"callback_status"`
+	CallbackAttempts int            `json:"callback_attempts" db:"callback_attempts"`
+	LastHTTPStatus   *int           `json:"last_http_status,omitempty" db:"last_http_status"`
+	LastError        string         `json:"last_error,omitempty" db:"last_error"`
+	NextRetryAt      *time.Time     `json:"next_retry_at,omitempty" db:"next_retry_at"`
+	SweepClaimedAt   *time.Time     `json:"sweep_claimed_at,omitempty" db:"sweep_claimed_at"`
+	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
+}
+
 // MessageLog registra tentativas de envio e respostas recebidas por system/cliente externo.
 type MessageLog struct {
 	ID               string           `json:"id" db:"id"`
@@ -122,6 +241,7 @@ type MessageLog struct {
 	RelayAttempts  int        `json:"relay_attempts,omitempty" db:"relay_attempts"`
 	NextAttemptAt  *time.Time `json:"next_attempt_at,omitempty" db:"next_attempt_at"`
 	FailureReason  string     `json:"failure_reason,omitempty" db:"failure_reason"`
+	FailureCode    string     `json:"failure_code,omitempty" db:"failure_code"`
 	LastError      string     `json:"last_error,omitempty" db:"last_error"`
 	InboundPayload []byte     `json:"-" db:"inbound_payload"`
 }
