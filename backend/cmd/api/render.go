@@ -545,8 +545,11 @@ func usageVolumeErrorHTML(message string) string {
 }
 
 func writeUsageVolumeError(w http.ResponseWriter, status int, message string) {
+	// htmx 2 default does not swap [45]xx into hx-target; return 200 like respondFormFeedback
+	// so #usage-volume-card receives the retry partial.
+	_ = status
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(usageVolumeErrorHTML(message)))
 }
 

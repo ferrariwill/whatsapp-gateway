@@ -92,7 +92,7 @@
 
   function removeRowAfterDelete(event, rowId, tbodyId, emptyHtml) {
     if (!event.detail.successful) {
-      showToast('Não foi possível excluir. Tente novamente.', 'error');
+      // Error toast comes from htmx:responseError — avoid double toast.
       return;
     }
     document.getElementById(rowId)?.remove();
