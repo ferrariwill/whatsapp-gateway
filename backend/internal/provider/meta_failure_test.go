@@ -237,7 +237,7 @@ func TestTemplateAPIFailuresArePropagated(t *testing.T) {
 		t.Errorf("GetTemplatesStatus should surface the 429, got %v", err)
 	}
 
-	if err := meta.SendTextMessage(
+	if _, err := meta.SendTextMessage(
 		context.Background(), qaAccessToken, "phone-1", "5511999999999", "alerta",
 	); err == nil || !strings.Contains(err.Error(), "status 429") {
 		t.Errorf("SendTextMessage should surface the 429, got %v", err)

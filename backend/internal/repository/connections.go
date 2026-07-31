@@ -13,7 +13,8 @@ var ErrConnectionNotFound = errors.New("whatsapp connection not found")
 
 const connectionColumns = `
 	id, system_id, sistema_origem, tenant_id, waba_id, phone_number_id,
-	access_token, webhook_url, COALESCE(webhook_secret, ''), whatsapp_phone_number, status, created_at
+	access_token, webhook_url, COALESCE(webhook_secret, ''), whatsapp_phone_number, status, created_at,
+	rate_limit_rps, rate_limit_burst
 `
 
 func (r *PostgresRepository) CreateWhatsAppConnection(ctx context.Context, conn *model.WhatsAppConnection) error {
@@ -228,9 +229,12 @@ func (r *PostgresRepository) ActivateConnection(ctx context.Context, id string) 
 func (r *PostgresRepository) scanConnection(row *sql.Row) (*model.WhatsAppConnection, error) {
 	var conn model.WhatsAppConnection
 	var webhookURL, phone sql.NullString
+	var rps sql.NullFloat64
+	var burst sql.NullInt64
 	err := row.Scan(
 		&conn.ID, &conn.SystemID, &conn.SistemaOrigem, &conn.TenantID, &conn.WabaID, &conn.PhoneNumberID,
 		&conn.AccessToken, &webhookURL, &conn.WebhookSecret, &phone, &conn.Status, &conn.CreatedAt,
+		&rps, &burst,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrConnectionNotFound
@@ -244,15 +248,26 @@ func (r *PostgresRepository) scanConnection(row *sql.Row) (*model.WhatsAppConnec
 	if phone.Valid {
 		conn.WhatsAppPhoneNumber = phone.String
 	}
+	if rps.Valid {
+		v := rps.Float64
+		conn.RateLimitRPS = &v
+	}
+	if burst.Valid {
+		v := int(burst.Int64)
+		conn.RateLimitBurst = &v
+	}
 	return &conn, nil
 }
 
 func (r *PostgresRepository) scanConnectionRow(rows *sql.Rows) (model.WhatsAppConnection, error) {
 	var conn model.WhatsAppConnection
 	var webhookURL, phone sql.NullString
+	var rps sql.NullFloat64
+	var burst sql.NullInt64
 	err := rows.Scan(
 		&conn.ID, &conn.SystemID, &conn.SistemaOrigem, &conn.TenantID, &conn.WabaID, &conn.PhoneNumberID,
 		&conn.AccessToken, &webhookURL, &conn.WebhookSecret, &phone, &conn.Status, &conn.CreatedAt,
+		&rps, &burst,
 	)
 	if err != nil {
 		return conn, fmt.Errorf("scan whatsapp connection row: %w", err)
@@ -262,6 +277,14 @@ func (r *PostgresRepository) scanConnectionRow(rows *sql.Rows) (model.WhatsAppCo
 	}
 	if phone.Valid {
 		conn.WhatsAppPhoneNumber = phone.String
+	}
+	if rps.Valid {
+		v := rps.Float64
+		conn.RateLimitRPS = &v
+	}
+	if burst.Valid {
+		v := int(burst.Int64)
+		conn.RateLimitBurst = &v
 	}
 	return conn, nil
 }

@@ -30,6 +30,9 @@ type WhatsAppConnection struct {
 	TemplatesSyncedAt  *time.Time `json:"templates_synced_at,omitempty" db:"templates_synced_at"`
 	TemplatesSyncError string     `json:"templates_sync_error,omitempty" db:"templates_sync_error"`
 	TemplatesSyncedBy  string     `json:"templates_synced_by,omitempty" db:"templates_synced_by"`
+	// Rate limit override por tenant (NULL = herda system/env). Migration 000019.
+	RateLimitRPS   *float64 `json:"rate_limit_rps,omitempty" db:"rate_limit_rps"`
+	RateLimitBurst *int     `json:"rate_limit_burst,omitempty" db:"rate_limit_burst"`
 }
 
 // Status possíveis de um template no catálogo local (espelham a Meta em uppercase).
@@ -105,6 +108,46 @@ type System struct {
 	APIKeyHash string    `json:"-" db:"api_key_hash"`
 	WebhookURL string    `json:"webhook_url,omitempty" db:"webhook_url"`
 	CreatedAt  time.Time `json:"created_at" db:"created_at"`
+	// Defaults comerciais de throttle (migration 000019). Preenchidos quando o SELECT os traz.
+	DefaultRateLimitRPS   float64 `json:"default_rate_limit_rps,omitempty" db:"default_rate_limit_rps"`
+	DefaultRateLimitBurst int     `json:"default_rate_limit_burst,omitempty" db:"default_rate_limit_burst"`
+}
+
+// OutboundRetryKind classifica o payload reenviável na DLQ outbound→Meta.
+type OutboundRetryKind string
+
+const (
+	OutboundRetryKindTemplate      OutboundRetryKind = "template"
+	OutboundRetryKindText          OutboundRetryKind = "text"
+	OutboundRetryKindPlainTemplate OutboundRetryKind = "plain_template"
+)
+
+// OutboundRetryStatus é o ciclo de vida da fila outbound_retry_queue.
+type OutboundRetryStatus string
+
+const (
+	OutboundRetryPending   OutboundRetryStatus = "pending"
+	OutboundRetryRelaying  OutboundRetryStatus = "relaying"
+	OutboundRetrySent      OutboundRetryStatus = "sent"
+	OutboundRetryFailed    OutboundRetryStatus = "failed"
+	OutboundRetryExhausted OutboundRetryStatus = "exhausted"
+)
+
+// OutboundRetryQueueItem é um retry assíncrono após Meta 429/5xx (sem busy-loop no request).
+type OutboundRetryQueueItem struct {
+	ID             string              `json:"id" db:"id"`
+	MessageLogID   string              `json:"message_log_id" db:"message_log_id"`
+	SystemID       string              `json:"system_id" db:"system_id"`
+	ConnectionID   string              `json:"connection_id" db:"connection_id"`
+	Kind           OutboundRetryKind   `json:"kind" db:"kind"`
+	PayloadJSON    []byte              `json:"payload_json" db:"payload_json"`
+	Attempts       int                 `json:"attempts" db:"attempts"`
+	NextAttemptAt  time.Time           `json:"next_attempt_at" db:"next_attempt_at"`
+	LastError      string              `json:"last_error,omitempty" db:"last_error"`
+	Status         OutboundRetryStatus `json:"status" db:"status"`
+	SweepClaimedAt *time.Time          `json:"sweep_claimed_at,omitempty" db:"sweep_claimed_at"`
+	CreatedAt      time.Time           `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time           `json:"updated_at" db:"updated_at"`
 }
 
 // User representa um operador do painel web do gateway.
@@ -198,6 +241,7 @@ type MessageLog struct {
 	RelayAttempts  int        `json:"relay_attempts,omitempty" db:"relay_attempts"`
 	NextAttemptAt  *time.Time `json:"next_attempt_at,omitempty" db:"next_attempt_at"`
 	FailureReason  string     `json:"failure_reason,omitempty" db:"failure_reason"`
+	FailureCode    string     `json:"failure_code,omitempty" db:"failure_code"`
 	LastError      string     `json:"last_error,omitempty" db:"last_error"`
 	InboundPayload []byte     `json:"-" db:"inbound_payload"`
 }

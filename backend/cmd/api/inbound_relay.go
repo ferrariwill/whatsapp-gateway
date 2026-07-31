@@ -71,6 +71,10 @@ func (s *server) relayInboundEvents(ctx context.Context, relay inboundRelay, eve
 			continue
 		}
 
+		if err := s.repo.UpsertLastInbound(ctx, relay.systemID, relay.externalClientID, event.from, time.Now().UTC()); err != nil {
+			log.Printf("upsert contact session %s: %v", relay.label, err)
+		}
+
 		if event.auditOnly {
 			log.Printf("inbound %s: unknown type=%q meta_message_id=%s audited, not relayed to SaaS",
 				relay.label, event.rawType, event.id)
