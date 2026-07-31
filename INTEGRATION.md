@@ -50,6 +50,17 @@ Consulte `.env.example` na raiz do monorepo.
 
 > **Segurança:** a `X-API-Key` da aplicação é armazenada apenas como hash SHA-256. O token Meta **não** vai para o banco — somente em variáveis de ambiente do backend.
 
+#### Recuperação de senha do painel (operacional)
+
+Não existe fluxo self-service de “esqueci minha senha” no painel. Reset é processo operacional:
+
+1. **Local / seed:** reaplicar a migration `backend/migrations/000002_seed_admin_user.up.sql` (credenciais documentadas no próprio SQL).
+2. **Produção:** gerar um hash bcrypt com `security.HashPassword` (ou equivalente) e atualizar `users.password_hash` para o e-mail do operador:
+   ```sql
+   UPDATE users SET password_hash = '<bcrypt>' WHERE email = '<admin@empresa.com>';
+   ```
+3. Confirme o login em `/login`. Se a sessão tiver expirado, o painel redireciona para `/login?error=session` (mensagem distinta de credencial inválida).
+
 ### 1.3 Cadastro via API (opcional)
 
 ```
