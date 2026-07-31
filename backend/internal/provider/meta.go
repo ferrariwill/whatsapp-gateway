@@ -530,6 +530,142 @@ func (p *MetaProvider) SendUtilityTemplate(
 	return err
 }
 
+// InteractiveButton is a reply button for interactive.type=button.
+type InteractiveButton struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// InteractiveListRow is a row inside a list section.
+type InteractiveListRow struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+}
+
+// InteractiveListSection groups rows under an optional title.
+type InteractiveListSection struct {
+	Title string               `json:"title,omitempty"`
+	Rows  []InteractiveListRow `json:"rows"`
+}
+
+// InteractivePayload is the Cloud API interactive message content (button or list).
+type InteractivePayload struct {
+	Type       string                   `json:"type"` // button | list
+	BodyText   string                   `json:"body_text"`
+	HeaderText string                   `json:"header_text,omitempty"`
+	FooterText string                   `json:"footer_text,omitempty"`
+	Buttons    []InteractiveButton      `json:"buttons,omitempty"`
+	ListButton string                   `json:"list_button,omitempty"`
+	Sections   []InteractiveListSection `json:"sections,omitempty"`
+}
+
+// SendInteractive envia mensagem interativa (botões ou lista) na janela de sessão.
+func (p *MetaProvider) SendInteractive(
+	ctx context.Context,
+	accessToken, phoneNumberID, to string,
+	payload InteractivePayload,
+) (string, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	phoneNumberID = strings.TrimSpace(phoneNumberID)
+	to = strings.TrimSpace(to)
+	payload.Type = strings.ToLower(strings.TrimSpace(payload.Type))
+	payload.BodyText = strings.TrimSpace(payload.BodyText)
+	payload.HeaderText = strings.TrimSpace(payload.HeaderText)
+	payload.FooterText = strings.TrimSpace(payload.FooterText)
+	payload.ListButton = strings.TrimSpace(payload.ListButton)
+
+	if accessToken == "" {
+		return "", fmt.Errorf("access token is required")
+	}
+	if phoneNumberID == "" {
+		return "", fmt.Errorf("phone number id is required")
+	}
+	if to == "" {
+		return "", fmt.Errorf("recipient phone number is required")
+	}
+	if payload.BodyText == "" {
+		return "", fmt.Errorf("body text is required")
+	}
+	if payload.Type != "button" && payload.Type != "list" {
+		return "", fmt.Errorf("interactive type must be button or list")
+	}
+
+	interactive := map[string]any{
+		"type": payload.Type,
+		"body": map[string]any{"text": payload.BodyText},
+	}
+	if payload.HeaderText != "" {
+		interactive["header"] = map[string]any{"type": "text", "text": payload.HeaderText}
+	}
+	if payload.FooterText != "" {
+		interactive["footer"] = map[string]any{"text": payload.FooterText}
+	}
+
+	switch payload.Type {
+	case "button":
+		buttons := make([]map[string]any, 0, len(payload.Buttons))
+		for _, b := range payload.Buttons {
+			buttons = append(buttons, map[string]any{
+				"type": "reply",
+				"reply": map[string]any{
+					"id":    strings.TrimSpace(b.ID),
+					"title": strings.TrimSpace(b.Title),
+				},
+			})
+		}
+		interactive["action"] = map[string]any{"buttons": buttons}
+	case "list":
+		sections := make([]map[string]any, 0, len(payload.Sections))
+		for _, sec := range payload.Sections {
+			rows := make([]map[string]any, 0, len(sec.Rows))
+			for _, row := range sec.Rows {
+				item := map[string]any{
+					"id":    strings.TrimSpace(row.ID),
+					"title": strings.TrimSpace(row.Title),
+				}
+				if desc := strings.TrimSpace(row.Description); desc != "" {
+					item["description"] = desc
+				}
+				rows = append(rows, item)
+			}
+			section := map[string]any{"rows": rows}
+			if title := strings.TrimSpace(sec.Title); title != "" {
+				section["title"] = title
+			}
+			sections = append(sections, section)
+		}
+		interactive["action"] = map[string]any{
+			"button":   payload.ListButton,
+			"sections": sections,
+		}
+	}
+
+	body := map[string]any{
+		"messaging_product": "whatsapp",
+		"to":                to,
+		"type":              "interactive",
+		"interactive":       interactive,
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("marshal interactive payload: %w", err)
+	}
+
+	respBody, err := p.doMetaRequest(ctx, accessToken, http.MethodPost, p.messagesURL(phoneNumberID), bodyBytes)
+	if err != nil {
+		return "", err
+	}
+	var sent sendMessageResponse
+	if err := json.Unmarshal(respBody, &sent); err != nil {
+		return "", fmt.Errorf("decode send message response: %w", err)
+	}
+	if len(sent.Messages) == 0 || strings.TrimSpace(sent.Messages[0].ID) == "" {
+		return "", fmt.Errorf("meta api returned empty message id")
+	}
+	return strings.TrimSpace(sent.Messages[0].ID), nil
+}
+
 func (p *MetaProvider) messagesURL(phoneNumberID string) string {
 	return fmt.Sprintf("%s/%s/%s/messages", graphAPIBaseURL, p.apiVersion, phoneNumberID)
 }

@@ -32,16 +32,19 @@ type inboundReaction struct {
 }
 
 type inboundEvent struct {
-	id        string
-	from      string
-	text      string
-	eventType string
-	action    string
-	media     *inboundMedia
-	location  *inboundLocation
-	reaction  *inboundReaction
-	rawType   string
-	auditOnly bool // tipos desconhecidos: auditados, não repassados
+	id               string
+	from             string
+	text             string
+	eventType        string
+	action           string
+	replyID          string
+	replyTitle       string
+	contextMessageID string
+	media            *inboundMedia
+	location         *inboundLocation
+	reaction         *inboundReaction
+	rawType          string
+	auditOnly        bool // tipos desconhecidos: auditados, não repassados
 }
 
 func (e inboundEvent) displayText() string {
@@ -67,32 +70,38 @@ func (e inboundEvent) displayText() string {
 }
 
 // inboundEventPayload é a forma normalizada persistida em message_logs.inbound_payload
-// para que o replay/DLQ preserve mídia/localização/reação.
+// para que o replay/DLQ preserve mídia/localização/reação e reply/context.
 type inboundEventPayload struct {
-	ID        string           `json:"id"`
-	From      string           `json:"from"`
-	Text      string           `json:"text,omitempty"`
-	EventType string           `json:"event_type"`
-	Action    string           `json:"action,omitempty"`
-	Media     *inboundMedia    `json:"media,omitempty"`
-	Location  *inboundLocation `json:"location,omitempty"`
-	Reaction  *inboundReaction `json:"reaction,omitempty"`
-	RawType   string           `json:"raw_type,omitempty"`
-	AuditOnly bool             `json:"audit_only,omitempty"`
+	ID               string           `json:"id"`
+	From             string           `json:"from"`
+	Text             string           `json:"text,omitempty"`
+	EventType        string           `json:"event_type"`
+	Action           string           `json:"action,omitempty"`
+	ReplyID          string           `json:"reply_id,omitempty"`
+	ReplyTitle       string           `json:"reply_title,omitempty"`
+	ContextMessageID string           `json:"context_message_id,omitempty"`
+	Media            *inboundMedia    `json:"media,omitempty"`
+	Location         *inboundLocation `json:"location,omitempty"`
+	Reaction         *inboundReaction `json:"reaction,omitempty"`
+	RawType          string           `json:"raw_type,omitempty"`
+	AuditOnly        bool             `json:"audit_only,omitempty"`
 }
 
 func marshalInboundEventPayload(event inboundEvent) ([]byte, error) {
 	return json.Marshal(inboundEventPayload{
-		ID:        event.id,
-		From:      event.from,
-		Text:      event.text,
-		EventType: event.eventType,
-		Action:    event.action,
-		Media:     event.media,
-		Location:  event.location,
-		Reaction:  event.reaction,
-		RawType:   event.rawType,
-		AuditOnly: event.auditOnly,
+		ID:               event.id,
+		From:             event.from,
+		Text:             event.text,
+		EventType:        event.eventType,
+		Action:           event.action,
+		ReplyID:          event.replyID,
+		ReplyTitle:       event.replyTitle,
+		ContextMessageID: event.contextMessageID,
+		Media:            event.media,
+		Location:         event.location,
+		Reaction:         event.reaction,
+		RawType:          event.rawType,
+		AuditOnly:        event.auditOnly,
 	})
 }
 
@@ -106,16 +115,19 @@ func inboundEventFromPayloadJSON(raw []byte, fallback inboundEvent) inboundEvent
 		return fallback
 	}
 	return inboundEvent{
-		id:        firstNonEmpty(p.ID, fallback.id),
-		from:      firstNonEmpty(p.From, fallback.from),
-		text:      firstNonEmpty(p.Text, fallback.text),
-		eventType: firstNonEmpty(p.EventType, fallback.eventType),
-		action:    firstNonEmpty(p.Action, fallback.action),
-		media:     p.Media,
-		location:  p.Location,
-		reaction:  p.Reaction,
-		rawType:   p.RawType,
-		auditOnly: p.AuditOnly,
+		id:               firstNonEmpty(p.ID, fallback.id),
+		from:             firstNonEmpty(p.From, fallback.from),
+		text:             firstNonEmpty(p.Text, fallback.text),
+		eventType:        firstNonEmpty(p.EventType, fallback.eventType),
+		action:           firstNonEmpty(p.Action, fallback.action),
+		replyID:          firstNonEmpty(p.ReplyID, fallback.replyID),
+		replyTitle:       firstNonEmpty(p.ReplyTitle, fallback.replyTitle),
+		contextMessageID: firstNonEmpty(p.ContextMessageID, fallback.contextMessageID),
+		media:            p.Media,
+		location:         p.Location,
+		reaction:         p.Reaction,
+		rawType:          p.RawType,
+		auditOnly:        p.AuditOnly,
 	}
 }
 
@@ -138,9 +150,12 @@ type metaMediaObject struct {
 }
 
 type metaInboundMessage struct {
-	ID   string `json:"id"`
-	From string `json:"from"`
-	Type string `json:"type"`
+	ID      string `json:"id"`
+	From    string `json:"from"`
+	Type    string `json:"type"`
+	Context *struct {
+		ID string `json:"id"`
+	} `json:"context"`
 	Text *struct {
 		Body string `json:"body"`
 	} `json:"text"`
@@ -154,6 +169,10 @@ type metaInboundMessage struct {
 			ID    string `json:"id"`
 			Title string `json:"title"`
 		} `json:"button_reply"`
+		ListReply *struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"list_reply"`
 	} `json:"interactive"`
 	Image    *metaMediaObject `json:"image"`
 	Audio    *metaMediaObject `json:"audio"`
@@ -170,6 +189,13 @@ type metaInboundMessage struct {
 	} `json:"reaction"`
 }
 
+func contextMessageID(message metaInboundMessage) string {
+	if message.Context == nil {
+		return ""
+	}
+	return strings.TrimSpace(message.Context.ID)
+}
+
 func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 	from := strings.TrimSpace(message.From)
 	if from == "" {
@@ -177,6 +203,7 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 	}
 	messageID := strings.TrimSpace(message.ID)
 	rawType := strings.TrimSpace(message.Type)
+	ctxID := contextMessageID(message)
 
 	switch rawType {
 	case "text":
@@ -184,11 +211,12 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			return inboundEvent{}, false
 		}
 		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      strings.TrimSpace(message.Text.Body),
-			eventType: "text_message",
-			rawType:   rawType,
+			id:               messageID,
+			from:             from,
+			text:             strings.TrimSpace(message.Text.Body),
+			eventType:        "text_message",
+			contextMessageID: ctxID,
+			rawType:          rawType,
 		}, true
 
 	case "button":
@@ -196,34 +224,68 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			return inboundEvent{}, false
 		}
 		payload := strings.TrimSpace(message.Button.Payload)
+		title := strings.TrimSpace(message.Button.Text)
 		if payload == "" {
-			payload = strings.TrimSpace(message.Button.Text)
+			payload = title
 		}
 		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      payload,
-			eventType: "button_reply",
-			action:    mapButtonAction(payload),
-			rawType:   rawType,
+			id:               messageID,
+			from:             from,
+			text:             payload,
+			eventType:        "button_reply",
+			action:           mapButtonAction(payload),
+			replyID:          payload,
+			replyTitle:       title,
+			contextMessageID: ctxID,
+			rawType:          rawType,
 		}, true
 
 	case "interactive":
-		if message.Interactive == nil || message.Interactive.ButtonReply == nil {
+		if message.Interactive == nil {
 			return inboundEvent{}, false
 		}
-		payload := strings.TrimSpace(message.Interactive.ButtonReply.ID)
-		if payload == "" {
-			payload = strings.TrimSpace(message.Interactive.ButtonReply.Title)
+		if message.Interactive.ButtonReply != nil {
+			replyID := strings.TrimSpace(message.Interactive.ButtonReply.ID)
+			replyTitle := strings.TrimSpace(message.Interactive.ButtonReply.Title)
+			payload := replyID
+			if payload == "" {
+				payload = replyTitle
+			}
+			return inboundEvent{
+				id:               messageID,
+				from:             from,
+				text:             payload,
+				eventType:        "button_reply",
+				action:           mapButtonAction(payload),
+				replyID:          replyID,
+				replyTitle:       replyTitle,
+				contextMessageID: ctxID,
+				rawType:          rawType,
+			}, true
 		}
-		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      payload,
-			eventType: "button_reply",
-			action:    mapButtonAction(payload),
-			rawType:   rawType,
-		}, true
+		if message.Interactive.ListReply != nil {
+			replyID := strings.TrimSpace(message.Interactive.ListReply.ID)
+			replyTitle := strings.TrimSpace(message.Interactive.ListReply.Title)
+			payload := replyID
+			if payload == "" {
+				payload = replyTitle
+			}
+			if payload == "" {
+				return inboundEvent{}, false
+			}
+			return inboundEvent{
+				id:               messageID,
+				from:             from,
+				text:             payload,
+				eventType:        "list_reply",
+				action:           mapButtonAction(payload),
+				replyID:          replyID,
+				replyTitle:       replyTitle,
+				contextMessageID: ctxID,
+				rawType:          rawType,
+			}, true
+		}
+		return inboundEvent{}, false
 
 	case "image":
 		media := mediaFromMeta(message.Image)
@@ -231,12 +293,13 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			return inboundEvent{}, false
 		}
 		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      media.Caption,
-			eventType: "image_message",
-			media:     media,
-			rawType:   rawType,
+			id:               messageID,
+			from:             from,
+			text:             media.Caption,
+			eventType:        "image_message",
+			contextMessageID: ctxID,
+			media:            media,
+			rawType:          rawType,
 		}, true
 
 	case "audio":
@@ -245,11 +308,12 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			return inboundEvent{}, false
 		}
 		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			eventType: "audio_message",
-			media:     media,
-			rawType:   rawType,
+			id:               messageID,
+			from:             from,
+			eventType:        "audio_message",
+			contextMessageID: ctxID,
+			media:            media,
+			rawType:          rawType,
 		}, true
 
 	case "document":
@@ -258,12 +322,13 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			return inboundEvent{}, false
 		}
 		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      media.Caption,
-			eventType: "document_message",
-			media:     media,
-			rawType:   rawType,
+			id:               messageID,
+			from:             from,
+			text:             media.Caption,
+			eventType:        "document_message",
+			contextMessageID: ctxID,
+			media:            media,
+			rawType:          rawType,
 		}, true
 
 	case "location":
@@ -277,12 +342,13 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			Address:   strings.TrimSpace(message.Location.Address),
 		}
 		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      loc.Name,
-			eventType: "location_message",
-			location:  loc,
-			rawType:   rawType,
+			id:               messageID,
+			from:             from,
+			text:             loc.Name,
+			eventType:        "location_message",
+			contextMessageID: ctxID,
+			location:         loc,
+			rawType:          rawType,
 		}, true
 
 	case "reaction":
@@ -294,24 +360,26 @@ func parseInboundMessage(message metaInboundMessage) (inboundEvent, bool) {
 			Emoji:     strings.TrimSpace(message.Reaction.Emoji),
 		}
 		return inboundEvent{
-			id:        messageID,
-			from:      from,
-			text:      re.Emoji,
-			eventType: "reaction_message",
-			reaction:  re,
-			rawType:   rawType,
+			id:               messageID,
+			from:             from,
+			text:             re.Emoji,
+			eventType:        "reaction_message",
+			contextMessageID: ctxID,
+			reaction:         re,
+			rawType:          rawType,
 		}, true
 	}
 
 	// Desconhecido: auditar/logar — nunca descartar em silêncio.
 	log.Printf("inbound unknown message type=%q meta_message_id=%s from=%s — auditing", rawType, messageID, from)
 	return inboundEvent{
-		id:        messageID,
-		from:      from,
-		text:      rawType,
-		eventType: "unknown_message",
-		rawType:   rawType,
-		auditOnly: true,
+		id:               messageID,
+		from:             from,
+		text:             rawType,
+		eventType:        "unknown_message",
+		contextMessageID: ctxID,
+		rawType:          rawType,
+		auditOnly:        true,
 	}, true
 }
 
@@ -347,9 +415,13 @@ func mapButtonAction(payload string) string {
 func applyInboundEventToSaaSPayload(base *saasWebhookPayload, event inboundEvent) {
 	base.MetaMessageID = event.id
 	base.PhoneNumber = event.from
+	base.From = event.from
 	base.Text = event.text
 	base.EventType = event.eventType
 	base.Action = event.action
+	base.ReplyID = event.replyID
+	base.ReplyTitle = event.replyTitle
+	base.ContextMessageID = event.contextMessageID
 	base.Media = event.media
 	base.Location = event.location
 	base.Reaction = event.reaction
@@ -358,9 +430,13 @@ func applyInboundEventToSaaSPayload(base *saasWebhookPayload, event inboundEvent
 func applyInboundEventToLegacyPayload(base *outboundWebhookPayload, event inboundEvent) {
 	base.MetaMessageID = event.id
 	base.PhoneNumber = event.from
+	base.From = event.from
 	base.Text = event.text
 	base.EventType = event.eventType
 	base.Action = event.action
+	base.ReplyID = event.replyID
+	base.ReplyTitle = event.replyTitle
+	base.ContextMessageID = event.contextMessageID
 	base.Media = event.media
 	base.Location = event.location
 	base.Reaction = event.reaction

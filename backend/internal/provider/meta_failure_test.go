@@ -394,3 +394,70 @@ func TestMetaProviderRejectsIncompleteConnection(t *testing.T) {
 		})
 	}
 }
+
+// TestSendInteractiveBuildsGraphBodyAndPropagatesFailures cobre o envelope
+// interactive button/list e erros HTTP da Meta sem rede real.
+func TestSendInteractiveBuildsGraphBodyAndPropagatesFailures(t *testing.T) {
+	t.Run("button success", func(t *testing.T) {
+		var gotBody []byte
+		client := newFakeMetaClient(t, func(r *http.Request) (*http.Response, error) {
+			gotBody, _ = io.ReadAll(r.Body)
+			return jsonResponse(http.StatusOK, `{"messages":[{"id":"wamid.INT"}]}`), nil
+		})
+		id, err := NewMetaProvider(client, "v21.0").SendInteractive(
+			context.Background(), qaAccessToken, "phone-1", "5511999999999",
+			InteractivePayload{
+				Type: "button", BodyText: "Confirma?",
+				Buttons: []InteractiveButton{{ID: "CONFIRM", Title: "Confirmar"}, {ID: "CANCEL", Title: "Cancelar"}},
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id != "wamid.INT" {
+			t.Fatalf("id=%q", id)
+		}
+		if !strings.Contains(string(gotBody), `"type":"interactive"`) ||
+			!strings.Contains(string(gotBody), `"type":"button"`) {
+			t.Fatalf("body=%s", gotBody)
+		}
+	})
+
+	t.Run("list success", func(t *testing.T) {
+		var gotBody []byte
+		client := newFakeMetaClient(t, func(r *http.Request) (*http.Response, error) {
+			gotBody, _ = io.ReadAll(r.Body)
+			return jsonResponse(http.StatusOK, `{"messages":[{"id":"wamid.LIST"}]}`), nil
+		})
+		id, err := NewMetaProvider(client, "v21.0").SendInteractive(
+			context.Background(), qaAccessToken, "phone-1", "5511999999999",
+			InteractivePayload{
+				Type: "list", BodyText: "Horários", ListButton: "Ver",
+				Sections: []InteractiveListSection{{
+					Title: "Manhã",
+					Rows:  []InteractiveListRow{{ID: "slot_0900", Title: "09:00", Description: "Dr"}},
+				}},
+			},
+		)
+		if err != nil || id != "wamid.LIST" {
+			t.Fatalf("id=%q err=%v", id, err)
+		}
+		if !strings.Contains(string(gotBody), `"type":"list"`) ||
+			!strings.Contains(string(gotBody), `"slot_0900"`) {
+			t.Fatalf("body=%s", gotBody)
+		}
+	})
+
+	t.Run("meta 429", func(t *testing.T) {
+		client := newFakeMetaClient(t, func(_ *http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusTooManyRequests, metaErrorBody(130429, "Rate limit hit")), nil
+		})
+		_, err := NewMetaProvider(client, "v21.0").SendInteractive(
+			context.Background(), qaAccessToken, "phone-1", "5511999999999",
+			InteractivePayload{Type: "button", BodyText: "x", Buttons: []InteractiveButton{{ID: "a", Title: "A"}}},
+		)
+		if err == nil || !strings.Contains(err.Error(), "429") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
