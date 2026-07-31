@@ -1,0 +1,45 @@
+{{define "audit_row.html"}}
+<article
+  data-entity-row
+  class="border-b border-slate-800 bg-slate-900/30 p-4 last:border-b-0 {{if .SpamAlert}}bg-amber-500/10 ring-1 ring-inset ring-amber-500/30{{end}}"
+>
+  <div class="flex items-start justify-between gap-3">
+    <div class="min-w-0 flex-1">
+      <p class="text-xs text-slate-500">{{.CreatedAt}}</p>
+      <p class="mt-1 text-base font-medium text-white">{{.SystemName}}</p>
+      <p class="font-mono text-sm text-slate-300 break-all">
+        {{if .ExternalClientID}}Cliente #{{.ExternalClientID}}{{else}}—{{end}}
+        · {{.PhoneNumber}}
+      </p>
+      <p class="mt-1 text-sm text-slate-300">{{.TemplateLabel}}</p>
+    </div>
+    <div class="flex shrink-0 flex-col items-end gap-1">
+      {{if .IsInbound}}
+      <span class="inline-flex rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400 ring-1 ring-emerald-500/20">Entrada</span>
+      {{else}}
+      <span class="inline-flex rounded-full bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-400 ring-1 ring-blue-500/20">Saída</span>
+      {{end}}
+      {{if .SpamAlert}}
+      <span class="inline-flex rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-400 ring-1 ring-red-500/20">⚠ Spam</span>
+      {{end}}
+      {{if .IsRejected}}
+      <span class="inline-flex rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 ring-1 ring-amber-500/20">Recusado</span>
+      {{else}}
+      <span class="font-mono text-xs text-slate-400 break-all">{{.Status}}</span>
+      {{end}}
+    </div>
+  </div>
+
+  {{if .FailureReason}}
+  <div class="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2">
+    <p class="text-xs text-amber-200/80">Motivo da falha</p>
+    <p class="mt-1 font-mono text-sm text-amber-100 break-all">{{.FailureReason}}</p>
+  </div>
+  {{end}}
+
+  <details class="mt-3">
+    <summary class="cursor-pointer select-none text-sm text-slate-400 hover:text-slate-200">Ver conteúdo</summary>
+    <p class="mt-2 text-sm text-slate-300 break-all whitespace-pre-wrap">{{if .Content}}{{.Content}}{{else}}—{{end}}</p>
+  </details>
+</article>
+{{end}}
