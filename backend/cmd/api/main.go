@@ -78,6 +78,9 @@ type server struct {
 	tokenBucket    *security.TokenBucketLimiter
 	rateLimitCache *sync.Map
 
+	// mediaStore hospeda binários outbound com URL assinada (TTL curto, scoped por system_id).
+	mediaStore *mediaStore
+
 	// relay limita a concorrência do processamento inbound e permite drenar os
 	// repasses em voo no shutdown. Nil volta ao comportamento de uma goroutine
 	// por evento (usado em testes unitários que montam o server na mão).
@@ -227,6 +230,8 @@ func main() {
 
 		rateLimitCache: &sync.Map{},
 
+		mediaStore: newMediaStore(mediaSigningSecret()),
+
 		relay: newRelayPool(relayPoolConfigFromEnv()),
 
 		rejectionLog: newLogSampler(envDuration("WEBHOOK_REJECTION_LOG_INTERVAL", defaultRejectionLogInterval)),
@@ -286,6 +291,8 @@ func main() {
 
 	mux.Handle("POST /v1/messages/send-template", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendTemplate)))
 	mux.Handle("POST /v1/messages/send-text", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendText)))
+	mux.Handle("POST /v1/messages/image", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendImage)))
+	mux.Handle("POST /v1/messages/document", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendDocument)))
 
 	mux.Handle("POST /v1/templates/sync", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSyncTemplates)))
 	mux.Handle("POST /v1/templates", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleCreateTemplate)))
@@ -295,8 +302,11 @@ func main() {
 	mux.Handle("GET /v1/usage/report", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleUsageReport)))
 
 	mux.Handle("GET /v1/messages/{meta_message_id}/status", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetMessageStatus)))
+	mux.Handle("GET /v1/media/{id}", http.HandlerFunc(srv.handleGetHostedMedia))
+	mux.Handle("GET /v1/media/{id}/auth", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)))
 
 	mux.Handle("POST /admin/delivery-events/{id}/reprocess", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminReprocessDeliveryEvent)))
+	mux.Handle("POST /admin/messages/send-media", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminSendMediaTest)))
 
 	addr := envOrDefault("PORT", "8080")
 

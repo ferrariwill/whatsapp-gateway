@@ -238,6 +238,9 @@ func (s *qaMetaStub) RoundTrip(r *http.Request) (*http.Response, error) {
 	s.mu.Unlock()
 
 	status, responseBody := http.StatusOK, fmt.Sprintf(`{"messages":[{"id":"wamid.QA.%06d"}]}`, seq)
+	if strings.HasSuffix(call.Path, "/media") {
+		status, responseBody = http.StatusOK, fmt.Sprintf(`{"id":"media.QA.%06d"}`, seq)
+	}
 	if respond != nil {
 		status, responseBody = respond(call, seq)
 	}
@@ -323,6 +326,7 @@ func newQAServerWithRelay(
 		rateLimiter:    security.NewRateLimiter(maxMessagesPerMinute, 15*time.Minute),
 		tokenBucket:    security.NewTokenBucketLimiter(),
 		rateLimitCache: &sync.Map{},
+		mediaStore:     newMediaStore([]byte("qa-media-signing-secret-32bytes!!")),
 		relay:          pool,
 		rejectionLog:   newLogSampler(defaultRejectionLogInterval),
 	}
