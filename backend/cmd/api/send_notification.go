@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/whatsappgetway/gateway/internal/model"
 	"github.com/whatsappgetway/gateway/internal/provider"
@@ -201,6 +202,7 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	day := usageDayUTC(time.Now())
 	if sendErr != nil {
 		kind := model.OutboundRetryKindTemplate
 		payload := map[string]any{
@@ -213,9 +215,12 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 			payload["language_code"] = req.LanguageCode
 		}
 		s.maybeEnqueueOutboundRetry(r.Context(), conn, messageLog, kind, payload, sendErr)
+		s.recordUsageBestEffort(r.Context(), conn.SystemID, conn.TenantID, day, outboundErrorDelta(sendErr), "send-notification/meta-error")
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: sendErr.Error()})
 		return
 	}
+
+	s.recordUsageBestEffort(r.Context(), conn.SystemID, conn.TenantID, day, outboundSuccessDelta(req.TemplateName, ""), "send-notification/sent")
 
 	writeJSON(w, http.StatusOK, sendNotificationResponse{
 		MessageLogID:  messageLog.ID,

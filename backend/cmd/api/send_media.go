@@ -151,6 +151,8 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 			if provider.IsMetaRateLimited(uploadErr) {
 				failureCode = "meta_rate_limited"
 			}
+			s.recordUsageBestEffort(r.Context(), conn.SystemID, conn.TenantID, usageDayUTC(time.Now()),
+				outboundErrorDelta(uploadErr), "send-media/upload-error")
 			writeJSON(w, http.StatusBadGateway, errorResponse{Error: uploadErr.Error(), Code: failureCode})
 			return
 		}
@@ -215,6 +217,7 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 		return
 	}
 
+	day := usageDayUTC(time.Now())
 	if sendErr != nil {
 		retryKind := model.OutboundRetryKindImage
 		if kind == "document" {
@@ -228,9 +231,13 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 			"filename":     filename,
 			"kind":         kind,
 		}, sendErr)
+		s.recordUsageBestEffort(r.Context(), conn.SystemID, conn.TenantID, day, outboundErrorDelta(sendErr), "send-media/meta-error")
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: sendErr.Error(), Code: failureCode})
 		return
 	}
+
+	// TemplateName no log guarda o kind (image/document); metering usa msgType, não o nome.
+	s.recordUsageBestEffort(r.Context(), conn.SystemID, conn.TenantID, day, outboundSuccessDelta("", kind), "send-media/sent")
 
 	writeJSON(w, http.StatusOK, sendMediaResponse{
 		MessageLogID:  messageLog.ID,

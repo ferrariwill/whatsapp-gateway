@@ -344,15 +344,20 @@ func (s *server) handleSendInteractive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	day := usageDayUTC(time.Now())
 	if sendErr != nil {
 		retryPayload := map[string]any{
 			"phone_number": req.PhoneNumber,
 			"interactive":  providerPayload,
 		}
 		s.maybeEnqueueOutboundRetry(r.Context(), conn, messageLog, model.OutboundRetryKindInteractive, retryPayload, sendErr)
+		s.recordUsageBestEffort(r.Context(), conn.SystemID, conn.TenantID, day, outboundErrorDelta(sendErr), "send-interactive/meta-error")
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: sendErr.Error(), Code: failureCode})
 		return
 	}
+
+	// Interactive não é template Meta de catálogo: conta como sent_text (sem coluna sent_interactive).
+	s.recordUsageBestEffort(r.Context(), conn.SystemID, conn.TenantID, day, outboundSuccessDelta("", "interactive"), "send-interactive/sent")
 
 	writeJSON(w, http.StatusOK, sendInteractiveResponse{
 		MessageLogID:  messageLog.ID,

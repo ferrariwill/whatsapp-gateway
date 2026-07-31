@@ -140,14 +140,18 @@ func (s *server) handleSendText(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	day := usageDayUTC(time.Now())
 	if sendErr != nil {
 		s.maybeEnqueueOutboundRetry(r.Context(), conn, messageLog, model.OutboundRetryKindText, map[string]any{
 			"phone_number": req.PhoneNumber,
 			"text":         req.Text,
 		}, sendErr)
+		s.recordUsageBestEffort(r.Context(), conn.SystemID, conn.TenantID, day, outboundErrorDelta(sendErr), "send-text/meta-error")
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: sendErr.Error(), Code: failureCode})
 		return
 	}
+
+	s.recordUsageBestEffort(r.Context(), conn.SystemID, conn.TenantID, day, outboundSuccessDelta("", "text"), "send-text/sent")
 
 	writeJSON(w, http.StatusOK, sendTextResponse{
 		MessageLogID:  messageLog.ID,
