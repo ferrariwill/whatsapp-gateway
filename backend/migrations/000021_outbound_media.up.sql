@@ -1,4 +1,5 @@
 -- DEV-165: outbound media objects + retry kinds for image/document
+-- Numbered 000021 because develop already has 000020_interactive_outbound_retry (DEV-166).
 CREATE TABLE media_objects (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     system_id     UUID NOT NULL REFERENCES systems(id) ON DELETE CASCADE,
@@ -24,4 +25,4 @@ ALTER TABLE outbound_retry_queue
 
 ALTER TABLE outbound_retry_queue
     ADD CONSTRAINT outbound_retry_queue_kind_check
-    CHECK (kind IN ('template', 'text', 'plain_template', 'image', 'document'));
+    CHECK (kind IN ('template', 'text', 'plain_template', 'interactive', 'image', 'document'));

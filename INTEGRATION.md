@@ -299,6 +299,95 @@ Fan-out de status (DEV-111) continua correlacionando por `meta_message_id`.
 
 ---
 
+## 2.2 Mensagens interativas (botões / lista) — janela 24h
+
+Mensagem de sessão (não é template). Exige inbound do contato nas últimas 24h
+(`contact_sessions` / DEV-112). Fora da janela → `422` com `code: outside_24h_window`
+(use template).
+
+### Endpoint
+
+```
+POST /v1/messages/interactive
+X-API-Key: sk_live_...
+```
+
+### Exemplo — botões (1–3)
+
+```json
+{
+  "tenant_id": "45",
+  "phone_number": "5511999887766",
+  "type": "button",
+  "body_text": "Confirma sua consulta?",
+  "header_text": "opcional ≤60",
+  "footer_text": "opcional ≤60",
+  "buttons": [
+    { "id": "CONFIRM", "title": "Confirmar" },
+    { "id": "CANCEL", "title": "Cancelar" }
+  ]
+}
+```
+
+### Exemplo — lista
+
+```json
+{
+  "tenant_id": "45",
+  "phone_number": "5511999887766",
+  "type": "list",
+  "body_text": "Escolha um horário",
+  "list_button": "Ver horários",
+  "sections": [
+    {
+      "title": "Manhã",
+      "rows": [
+        { "id": "slot_0900", "title": "09:00", "description": "Dr. Silva" }
+      ]
+    }
+  ]
+}
+```
+
+### Resposta `200`
+
+```json
+{
+  "message_log_id": "uuid",
+  "status": "sent",
+  "meta_message_id": "wamid...."
+}
+```
+
+### Erros locais (antes da Graph)
+
+| HTTP | `code` | Quando |
+|---|---|---|
+| `400` | — | JSON inválido / `tenant_id` ou `phone_number` ausentes |
+| `422` | `validation_error` | Limites Meta (ex.: 4 botões, title > 20) |
+| `422` | `outside_24h_window` | Sem inbound recente — usar template |
+| `404` | — | Conexão inexistente para o tenant |
+| `429` | — | Spam / rate / limite mensal |
+| `502` | — | Falha Meta (mensagem no `error`) |
+
+Limites validados localmente: botões 1–3 (`id` ≤256, `title` ≤20); lista ≤10 seções
+e ≤10 rows no total; `list_button` 1–20; `body_text` 1–1024.
+
+### SDK
+
+```go
+_, err := client.SendInteractive(ctx, whatsapp.InteractiveRequest{
+  TenantID: "45", PhoneNumber: "5511999887766", Type: "button",
+  BodyText: "Confirma?",
+  Buttons: []whatsapp.InteractiveButton{
+    {ID: "CONFIRM", Title: "Confirmar"},
+    {ID: "CANCEL", Title: "Cancelar"},
+  },
+})
+```
+
+---
+
 ## 3. Fluxo de retorno (resposta do usuário → sua aplicação)
 
 Quando o usuário toca em um botão ou envia texto, a Meta notifica o Gateway em:
@@ -336,24 +425,31 @@ Content-Type: application/json
 ```json
 {
   "system_id": "uuid-da-aplicacao-no-gateway",
-  "external_client_id": "45",
+  "sistema_origem": "beleza_web",
+  "tenant_id": "45",
   "meta_message_id": "wamid.HBgLMT...",
   "phone_number": "5511999887766",
-  "text": "APPT_CONFIRM",
+  "from": "5511999887766",
+  "text": "CONFIRM",
   "event_type": "button_reply",
-  "action": "CONFIRM"
+  "action": "",
+  "reply_id": "CONFIRM",
+  "reply_title": "Confirmar",
+  "context_message_id": "wamid.outbound..."
 }
 ```
 
 | Campo | Descrição |
 |---|---|
 | `system_id` | UUID da aplicação no Gateway |
-| `external_client_id` | Cliente externo dono do chip (path legado); no webhook unificado o campo equivalente é `tenant_id` |
+| `external_client_id` / `tenant_id` | Cliente externo dono do chip |
 | `meta_message_id` | Identidade imutável do evento na Meta — use como chave de idempotência |
-| `phone_number` | WhatsApp de quem respondeu |
-| `text` | Texto ou payload do botão |
-| `event_type` | `text_message` ou `button_reply` |
-| `action` | `CONFIRM` ou `CANCEL` quando for resposta de botão de agendamento; vazio para texto livre |
+| `phone_number` / `from` | WhatsApp de quem respondeu (`from` = alias de `phone_number`) |
+| `text` | Texto ou payload do botão/lista (`reply_id` quando interativo) |
+| `event_type` | `text_message`, `button_reply`, `list_reply`, … |
+| `action` | `CONFIRM`/`CANCEL` só para payloads legados `APPT_*`; genéricos ficam vazios |
+| `reply_id` / `reply_title` | ID/título do `button_reply` ou `list_reply` |
+| `context_message_id` | `messages[].context.id` (mensagem outbound respondida), quando presente |
 
 ### Valores de `action`
 

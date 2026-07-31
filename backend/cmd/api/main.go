@@ -288,6 +288,7 @@ func main() {
 	mux.Handle("POST /v1/messages/send-text", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendText)))
 	mux.Handle("POST /v1/messages/image", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendImage)))
 	mux.Handle("POST /v1/messages/document", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendDocument)))
+	mux.Handle("POST /v1/messages/interactive", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendInteractive)))
 
 	mux.Handle("POST /v1/templates/sync", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSyncTemplates)))
 	mux.Handle("POST /v1/templates", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleCreateTemplate)))
