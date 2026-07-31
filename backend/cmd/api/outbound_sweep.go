@@ -135,6 +135,23 @@ func (s *server) executeOutboundRetry(
 		phone, _ := payload["phone_number"].(string)
 		text, _ := payload["text"].(string)
 		return meta.SendTextMessage(ctx, conn.AccessToken, conn.PhoneNumberID, phone, text)
+	case model.OutboundRetryKindImage:
+		phone, _ := payload["phone_number"].(string)
+		link, _ := payload["link"].(string)
+		mediaID, _ := payload["media_id"].(string)
+		caption, _ := payload["caption"].(string)
+		return meta.SendImageMessage(ctx, conn.AccessToken, conn.PhoneNumberID, phone, provider.ImageSendOpts{
+			Link: link, MediaID: mediaID, Caption: caption,
+		})
+	case model.OutboundRetryKindDocument:
+		phone, _ := payload["phone_number"].(string)
+		link, _ := payload["link"].(string)
+		mediaID, _ := payload["media_id"].(string)
+		caption, _ := payload["caption"].(string)
+		filename, _ := payload["filename"].(string)
+		return meta.SendDocumentMessage(ctx, conn.AccessToken, conn.PhoneNumberID, phone, provider.DocumentSendOpts{
+			Link: link, MediaID: mediaID, Caption: caption, Filename: filename,
+		})
 	case model.OutboundRetryKindPlainTemplate:
 		phone, _ := payload["phone_number"].(string)
 		name, _ := payload["template_name"].(string)

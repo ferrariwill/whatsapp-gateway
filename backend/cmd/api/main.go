@@ -286,6 +286,8 @@ func main() {
 
 	mux.Handle("POST /v1/messages/send-template", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendTemplate)))
 	mux.Handle("POST /v1/messages/send-text", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendText)))
+	mux.Handle("POST /v1/messages/image", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendImage)))
+	mux.Handle("POST /v1/messages/document", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendDocument)))
 	mux.Handle("POST /v1/messages/interactive", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendInteractive)))
 
 	mux.Handle("POST /v1/templates/sync", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSyncTemplates)))
@@ -296,8 +298,10 @@ func main() {
 	mux.Handle("GET /v1/usage/report", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleUsageReport)))
 
 	mux.Handle("GET /v1/messages/{meta_message_id}/status", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetMessageStatus)))
+	mux.Handle("GET /v1/media/{id}", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)))
 
 	mux.Handle("POST /admin/delivery-events/{id}/reprocess", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminReprocessDeliveryEvent)))
+	mux.Handle("POST /admin/messages/send-media", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminSendMediaTest)))
 
 	addr := envOrDefault("PORT", "8080")
 
@@ -349,6 +353,20 @@ func main() {
 
 		srv.runOutboundRetrySweeper(sweepCtx)
 
+	}()
+
+	go func() {
+		srv.sweepExpiredMedia(sweepCtx)
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sweepCtx.Done():
+				return
+			case <-ticker.C:
+				srv.sweepExpiredMedia(sweepCtx)
+			}
+		}
 	}()
 
 	nonceGCDone := make(chan struct{})

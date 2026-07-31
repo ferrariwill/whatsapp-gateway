@@ -165,6 +165,57 @@
         {{end}}
       </div>
     </section>
+
+    <section class="rounded-2xl border border-sky-500/20 bg-slate-900/50 p-6 ring-1 ring-sky-500/10">
+      <div class="mb-6">
+        <h2 class="text-lg font-semibold text-white">Enviar mídia (teste)</h2>
+        <p class="text-sm text-slate-400">Disparo operacional de imagem/documento por tenant — usa o mesmo path da API (<code class="text-emerald-300">POST /v1/messages/image|document</code>). Não expõe tokens Meta.</p>
+      </div>
+      <form
+        hx-post="/admin/messages/send-media"
+        hx-encoding="multipart/form-data"
+        hx-target="#send-media-result"
+        hx-swap="innerHTML"
+        class="grid gap-4 md:grid-cols-2"
+      >
+        <div>
+          <label for="send-media-system" class="mb-1 block text-sm text-slate-300">Aplicação</label>
+          <select id="send-media-system" name="system_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+            <option value="">Selecione…</option>
+            {{range .SystemOptions}}
+            <option value="{{.ID}}">{{.Name}} ({{.Slug}})</option>
+            {{end}}
+          </select>
+        </div>
+        <div>
+          <label for="send-media-tenant" class="mb-1 block text-sm text-slate-300">Tenant ID</label>
+          <input id="send-media-tenant" name="tenant_id" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50" placeholder="ID do tenant">
+        </div>
+        <div>
+          <label for="send-media-to" class="mb-1 block text-sm text-slate-300">Destino (WAID)</label>
+          <input id="send-media-to" name="to" required inputmode="tel" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50" placeholder="5511999999999">
+        </div>
+        <div>
+          <label for="send-media-type" class="mb-1 block text-sm text-slate-300">Tipo</label>
+          <select id="send-media-type" name="type" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+            <option value="image">Imagem</option>
+            <option value="document">Documento</option>
+          </select>
+        </div>
+        <div>
+          <label for="send-media-caption" class="mb-1 block text-sm text-slate-300">Caption (opcional)</label>
+          <input id="send-media-caption" name="caption" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none focus:border-emerald-500/50">
+        </div>
+        <div>
+          <label for="send-media-file" class="mb-1 block text-sm text-slate-300">Arquivo</label>
+          <input id="send-media-file" name="file" type="file" required class="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-500 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-slate-950">
+        </div>
+        <div class="md:col-span-2 flex items-center justify-between gap-3">
+          <button type="submit" class="min-h-[44px] rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400">Enviar mídia</button>
+        </div>
+      </form>
+      <div id="send-media-result" class="mt-4 min-h-[1.5rem]" aria-live="polite"></div>
+    </section>
   </main>
 </div>
 

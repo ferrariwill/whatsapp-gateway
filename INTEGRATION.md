@@ -235,7 +235,71 @@ err := client.SendAppointmentConfirmation(ctx,
 
 ---
 
-## 2.1 Mensagens interativas (botões / lista) — janela 24h
+## 2.1 Envio de mídia (sessão 24h) — DEV-165
+
+Mensagens livres de imagem/documento exigem janela de atendimento aberta (mesmo gate de `POST /v1/messages/send-text`). Templates **não** usam este gate.
+
+### Endpoints
+
+```
+POST /v1/messages/image
+POST /v1/messages/document
+GET  /v1/media/{id}?tenant_id=...
+```
+
+Auth: `X-API-Key` da aplicação. Tenant via `whatsapp_connections` (`tenant_id` no body).
+
+### JSON (link HTTPS público)
+
+```json
+{
+  "tenant_id": "salon-42",
+  "phone_number": "5511999999999",
+  "link": "https://cdn.example.com/comprovante.jpg",
+  "caption": "opcional",
+  "filename": "comprovante.pdf",
+  "appointment_id": "opcional"
+}
+```
+
+### Multipart (upload)
+
+Campos: `tenant_id`, `phone_number`, `file` (obrigatório), `caption`, `filename`, `appointment_id`.
+
+Fluxo: validar MIME/tamanho → persistir em `media_objects` + disco (`MEDIA_STORAGE_DIR`) → upload Graph → send com `media_id`.
+
+### Limites locais (antes do Graph)
+
+| Tipo | MIME | Máx |
+|---|---|---|
+| image | `image/jpeg`, `image/png` | 5 MiB |
+| document | `application/pdf` (+ text/plain, msword, OOXML) | 100 MiB |
+
+### Erros estruturados (`code`)
+
+| HTTP | `code` |
+|---|---|
+| 422 | `media_too_large` |
+| 422 | `unsupported_type` |
+| 422 | `outside_24h_window` |
+| 429 | `rate_limited` |
+| 502 | `meta_rate_limited` (quando aplicável) |
+
+### Download hospedado
+
+`GET /v1/media/{id}?tenant_id=<mesmo tenant>` com a API Key do **mesmo** system. Outro system/tenant → **404** (sem vazamento). GC best-effort remove `expires_at < now()` (startup + a cada 1h).
+
+### Resposta 200
+
+```json
+{ "message_log_id": "...", "status": "sent", "meta_message_id": "wamid...." }
+```
+
+Fan-out de status (DEV-111) continua correlacionando por `meta_message_id`.
+
+---
+
+## 2.2 Mensagens interativas (botões / lista) — janela 24h
 
 Mensagem de sessão (não é template). Exige inbound do contato nas últimas 24h
 (`contact_sessions` / DEV-112). Fora da janela → `422` com `code: outside_24h_window`

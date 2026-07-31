@@ -165,7 +165,7 @@ func requireQADB(t *testing.T) {
 
 func resetQAData(t *testing.T) {
 	t.Helper()
-	_, err := qaDB.Exec(`TRUNCATE outbound_retry_queue, rate_limit_audit, contact_sessions, webhook_event_dedupe, whatsapp_templates, message_delivery_events, oauth_state_nonces, message_logs, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
+	_, err := qaDB.Exec(`TRUNCATE outbound_retry_queue, rate_limit_audit, contact_sessions, webhook_event_dedupe, whatsapp_templates, message_delivery_events, oauth_state_nonces, message_logs, media_objects, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset qa data: %v", err)
 	}
@@ -238,6 +238,9 @@ func (s *qaMetaStub) RoundTrip(r *http.Request) (*http.Response, error) {
 	s.mu.Unlock()
 
 	status, responseBody := http.StatusOK, fmt.Sprintf(`{"messages":[{"id":"wamid.QA.%06d"}]}`, seq)
+	if strings.HasSuffix(call.Path, "/media") {
+		status, responseBody = http.StatusOK, fmt.Sprintf(`{"id":"media.QA.%06d"}`, seq)
+	}
 	if respond != nil {
 		status, responseBody = respond(call, seq)
 	}
@@ -314,6 +317,8 @@ func newQAServerWithRelay(
 	})
 
 	repo := repository.NewPostgresRepository(qaDB)
+	mediaDir := t.TempDir()
+	t.Setenv("MEDIA_STORAGE_DIR", mediaDir)
 	return &server{
 		repo:           repo,
 		jwtSecret:      []byte("qa-jwt-secret-with-at-least-32-chars!!"),
