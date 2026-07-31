@@ -165,7 +165,7 @@ func requireQADB(t *testing.T) {
 
 func resetQAData(t *testing.T) {
 	t.Helper()
-	_, err := qaDB.Exec(`TRUNCATE outbound_retry_queue, rate_limit_audit, contact_sessions, webhook_event_dedupe, whatsapp_templates, message_delivery_events, oauth_state_nonces, message_logs, media_objects, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
+	_, err := qaDB.Exec(`TRUNCATE usage_status_dedup, usage_counters, outbound_retry_queue, rate_limit_audit, contact_sessions, webhook_event_dedupe, whatsapp_templates, message_delivery_events, oauth_state_nonces, message_logs, media_objects, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset qa data: %v", err)
 	}
@@ -325,6 +325,7 @@ func newQAServerWithRelay(
 		metaClient:     &http.Client{Transport: stub, Timeout: 10 * time.Second},
 		metaAPIVer:     "v21.0",
 		usage:          service.NewUsageService(repo),
+		usageMeter:     service.NewUsageMeterService(repo),
 		rateLimiter:    security.NewRateLimiter(maxMessagesPerMinute, 15*time.Minute),
 		tokenBucket:    security.NewTokenBucketLimiter(),
 		rateLimitCache: &sync.Map{},

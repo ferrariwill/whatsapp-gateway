@@ -73,6 +73,8 @@ type server struct {
 
 	usage *service.UsageService
 
+	usageMeter *service.UsageMeterService
+
 	rateLimiter *security.RateLimiter
 
 	tokenBucket    *security.TokenBucketLimiter
@@ -221,6 +223,8 @@ func main() {
 
 		usage: service.NewUsageService(repo),
 
+		usageMeter: service.NewUsageMeterService(repo),
+
 		rateLimiter: security.NewRateLimiterFromEnv(),
 
 		tokenBucket: security.NewTokenBucketLimiter(),
@@ -296,6 +300,10 @@ func main() {
 	mux.Handle("GET /v1/templates", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleListTemplates)))
 
 	mux.Handle("GET /v1/usage/report", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleUsageReport)))
+
+	mux.Handle("GET /v1/usage", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleUsageMeter)))
+
+	mux.Handle("GET /v1/usage/export.csv", srv.jwtMiddleware(http.HandlerFunc(srv.handleUsageExportCSV)))
 
 	mux.Handle("GET /v1/messages/{meta_message_id}/status", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetMessageStatus)))
 	mux.Handle("GET /v1/media/{id}", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)))
@@ -1031,6 +1039,8 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	day := usageDayUTC(time.Now())
+
 	if sendErr != nil {
 
 		s.maybeEnqueueOutboundRetry(r.Context(), conn, messageLog, model.OutboundRetryKindTemplate, map[string]any{
@@ -1039,11 +1049,15 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 			"variables":     req.Variables,
 		}, sendErr)
 
+		s.recordUsageBestEffort(r.Context(), system.ID, req.ExternalClientID, day, outboundErrorDelta(sendErr), "send-template/meta-error")
+
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: sendErr.Error()})
 
 		return
 
 	}
+
+	s.recordUsageBestEffort(r.Context(), system.ID, req.ExternalClientID, day, outboundSuccessDelta(req.TemplateName, ""), "send-template/sent")
 
 	writeJSON(w, http.StatusOK, sendTemplateResponse{
 

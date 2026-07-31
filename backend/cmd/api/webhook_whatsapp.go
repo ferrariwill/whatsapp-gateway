@@ -232,7 +232,25 @@ func (s *server) processDeliveryStatusesFromPayload(
 						continue
 					}
 					log.Printf("mark message %s delivered: %v", metaMessageID, err)
+					continue
 				}
+
+				if s.usageMeter == nil {
+					continue
+				}
+				inserted, dedupErr := s.usageMeter.TryRecordStatusDelivered(ctx, conn.SystemID, metaMessageID)
+				if dedupErr != nil {
+					log.Printf("usage status dedup for %s: %v", metaMessageID, dedupErr)
+					continue
+				}
+				if !inserted {
+					continue
+				}
+				s.recordUsageBestEffort(
+					ctx, conn.SystemID, conn.TenantID, usageDayUTC(deliveredAt),
+					repository.UsageDelta{StatusCallbackDelivered: 1},
+					"webhook/delivered",
+				)
 			}
 		}
 	}

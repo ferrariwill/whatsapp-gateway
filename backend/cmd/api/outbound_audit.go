@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/whatsappgetway/gateway/internal/model"
+	"github.com/whatsappgetway/gateway/internal/repository"
 )
 
 const failureReasonRateLimited = "rate_limited"
@@ -72,5 +74,8 @@ func (s *server) auditRateLimitedOutbound(
 			"audit lost for rate-limited outbound (%s): system=%s connection=%s tenant=%s: %v — still responding 429",
 			origin, conn.SystemID, conn.ID, conn.TenantID, err,
 		)
+		return
 	}
+	s.recordUsageBestEffort(ctx, conn.SystemID, conn.TenantID, usageDayUTC(time.Now()),
+		repository.UsageDelta{Errors4xx: 1}, "rate-limit/"+origin)
 }

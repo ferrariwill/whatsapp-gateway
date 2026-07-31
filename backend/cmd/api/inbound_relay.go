@@ -75,6 +75,9 @@ func (s *server) relayInboundEvents(ctx context.Context, relay inboundRelay, eve
 			log.Printf("upsert contact session %s: %v", relay.label, err)
 		}
 
+		s.recordUsageBestEffort(ctx, relay.systemID, relay.externalClientID, usageDayUTC(time.Now()),
+			repository.UsageDelta{Inbound: 1}, "inbound/"+relay.label)
+
 		if event.auditOnly {
 			log.Printf("inbound %s: unknown type=%q meta_message_id=%s audited, not relayed to SaaS",
 				relay.label, event.rawType, event.id)
