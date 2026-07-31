@@ -78,9 +78,6 @@ type server struct {
 	tokenBucket    *security.TokenBucketLimiter
 	rateLimitCache *sync.Map
 
-	// mediaStore hospeda binários outbound com URL assinada (TTL curto, scoped por system_id).
-	mediaStore *mediaStore
-
 	// relay limita a concorrência do processamento inbound e permite drenar os
 	// repasses em voo no shutdown. Nil volta ao comportamento de uma goroutine
 	// por evento (usado em testes unitários que montam o server na mão).
@@ -230,8 +227,6 @@ func main() {
 
 		rateLimitCache: &sync.Map{},
 
-		mediaStore: newMediaStore(mediaSigningSecret()),
-
 		relay: newRelayPool(relayPoolConfigFromEnv()),
 
 		rejectionLog: newLogSampler(envDuration("WEBHOOK_REJECTION_LOG_INTERVAL", defaultRejectionLogInterval)),
@@ -302,8 +297,7 @@ func main() {
 	mux.Handle("GET /v1/usage/report", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleUsageReport)))
 
 	mux.Handle("GET /v1/messages/{meta_message_id}/status", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetMessageStatus)))
-	mux.Handle("GET /v1/media/{id}", http.HandlerFunc(srv.handleGetHostedMedia))
-	mux.Handle("GET /v1/media/{id}/auth", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)))
+	mux.Handle("GET /v1/media/{id}", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)))
 
 	mux.Handle("POST /admin/delivery-events/{id}/reprocess", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminReprocessDeliveryEvent)))
 	mux.Handle("POST /admin/messages/send-media", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminSendMediaTest)))
@@ -358,6 +352,20 @@ func main() {
 
 		srv.runOutboundRetrySweeper(sweepCtx)
 
+	}()
+
+	go func() {
+		srv.sweepExpiredMedia(sweepCtx)
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sweepCtx.Done():
+				return
+			case <-ticker.C:
+				srv.sweepExpiredMedia(sweepCtx)
+			}
+		}
 	}()
 
 	nonceGCDone := make(chan struct{})

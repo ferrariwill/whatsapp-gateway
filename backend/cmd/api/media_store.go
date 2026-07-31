@@ -1,139 +1,104 @@
 package main
 
 import (
-	"crypto/hmac"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/whatsappgetway/gateway/internal/model"
 )
 
-const defaultMediaTTL = 15 * time.Minute
+const defaultMediaTTL = 24 * time.Hour
 
-type mediaObject struct {
-	ID        string
-	SystemID  string
-	TenantID  string
-	MimeType  string
-	Filename  string
-	Data      []byte
-	ExpiresAt time.Time
-}
-
-type mediaStore struct {
-	mu      sync.RWMutex
-	objects map[string]*mediaObject
-	secret  []byte
-}
-
-func newMediaStore(secret []byte) *mediaStore {
-	if len(secret) == 0 {
-		secret = []byte("dev-media-signing-secret-change-me!!")
+func mediaStorageDir() string {
+	dir := strings.TrimSpace(os.Getenv("MEDIA_STORAGE_DIR"))
+	if dir == "" {
+		dir = filepath.Join(".", "data", "media")
 	}
-	return &mediaStore{
-		objects: make(map[string]*mediaObject),
-		secret:  secret,
-	}
+	return dir
 }
 
-func (s *mediaStore) Put(systemID, tenantID, mimeType, filename string, data []byte, ttl time.Duration) (*mediaObject, error) {
+func newMediaObjectID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
+}
+
+// persistOutboundMedia stores bytes on disk under MEDIA_STORAGE_DIR using an
+// internal UUID path (never client-supplied names) and inserts media_objects.
+func (s *server) persistOutboundMedia(
+	ctx context.Context,
+	systemID, tenantID, mimeType, originalName string,
+	data []byte,
+	ttl time.Duration,
+) (*model.MediaObject, error) {
 	if ttl <= 0 {
 		ttl = defaultMediaTTL
 	}
-	id, err := randomMediaID()
+	id, err := newMediaObjectID()
 	if err != nil {
+		return nil, fmt.Errorf("generate media id: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	rel := filepath.ToSlash(filepath.Join(systemID, id))
+	absDir := filepath.Join(mediaStorageDir(), systemID)
+	if err := os.MkdirAll(absDir, 0o750); err != nil {
+		return nil, fmt.Errorf("mkdir media storage: %w", err)
+	}
+	absPath := filepath.Join(absDir, id)
+	if err := os.WriteFile(absPath, data, 0o640); err != nil {
+		return nil, fmt.Errorf("write media file: %w", err)
+	}
+
+	expires := time.Now().UTC().Add(ttl)
+	obj := &model.MediaObject{
+		ID:           id,
+		SystemID:     systemID,
+		TenantID:     tenantID,
+		SHA256:       hex.EncodeToString(sum[:]),
+		MimeType:     mimeType,
+		ByteSize:     int64(len(data)),
+		StoragePath:  rel,
+		OriginalName: originalName,
+		ExpiresAt:    &expires,
+	}
+	if err := s.repo.CreateMediaObject(ctx, obj); err != nil {
+		_ = os.Remove(absPath)
 		return nil, err
 	}
-	obj := &mediaObject{
-		ID:        id,
-		SystemID:  systemID,
-		TenantID:  tenantID,
-		MimeType:  mimeType,
-		Filename:  filename,
-		Data:      append([]byte(nil), data...),
-		ExpiresAt: time.Now().UTC().Add(ttl),
-	}
-	s.mu.Lock()
-	s.objects[id] = obj
-	s.mu.Unlock()
 	return obj, nil
 }
 
-func (s *mediaStore) Get(id string) (*mediaObject, bool) {
-	s.mu.RLock()
-	obj, ok := s.objects[id]
-	s.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if time.Now().UTC().After(obj.ExpiresAt) {
-		s.mu.Lock()
-		delete(s.objects, id)
-		s.mu.Unlock()
-		return nil, false
-	}
-	return obj, true
+func absoluteMediaPath(storagePath string) string {
+	cleaned := filepath.Clean(filepath.FromSlash(storagePath))
+	return filepath.Join(mediaStorageDir(), cleaned)
 }
 
-// SignURLQuery builds exp + sig query values scoped to system_id + object id.
-func (s *mediaStore) SignURLQuery(systemID, objectID string, exp time.Time) (expUnix string, sig string) {
-	expUnix = strconv.FormatInt(exp.UTC().Unix(), 10)
-	sig = s.sign(systemID, objectID, expUnix)
-	return expUnix, sig
-}
-
-func (s *mediaStore) VerifySignature(systemID, objectID, expUnix, sig string) bool {
-	if systemID == "" || objectID == "" || expUnix == "" || sig == "" {
-		return false
-	}
-	exp, err := strconv.ParseInt(expUnix, 10, 64)
+// sweepExpiredMedia deletes expired DB rows and best-effort removes files.
+func (s *server) sweepExpiredMedia(ctx context.Context) {
+	objs, err := s.repo.DeleteExpiredMediaObjects(ctx, time.Now().UTC(), 200)
 	if err != nil {
-		return false
+		log.Printf("media GC: %v", err)
+		return
 	}
-	if time.Now().UTC().Unix() > exp {
-		return false
+	for _, obj := range objs {
+		path := absoluteMediaPath(obj.StoragePath)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.Printf("media GC remove %s: %v", obj.ID, err)
+		}
 	}
-	expected := s.sign(systemID, objectID, expUnix)
-	return hmac.Equal([]byte(expected), []byte(sig))
-}
-
-func (s *mediaStore) sign(systemID, objectID, expUnix string) string {
-	payload := systemID + "|" + objectID + "|" + expUnix
-	mac := hmac.New(sha256.New, s.secret)
-	_, _ = mac.Write([]byte(payload))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func randomMediaID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("generate media id: %w", err)
+	if len(objs) > 0 {
+		log.Printf("media GC: removed %d expired object(s)", len(objs))
 	}
-	return hex.EncodeToString(b[:]), nil
-}
-
-func mediaSigningSecret() []byte {
-	if v := strings.TrimSpace(os.Getenv("MEDIA_SIGNING_SECRET")); v != "" {
-		return []byte(v)
-	}
-	if v := strings.TrimSpace(os.Getenv("META_APP_SECRET")); v != "" {
-		return []byte(v)
-	}
-	if v := strings.TrimSpace(os.Getenv("JWT_SECRET")); v != "" {
-		return []byte(v)
-	}
-	return []byte("dev-media-signing-secret-change-me!!")
-}
-
-func publicBaseURL() string {
-	base := strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL"))
-	if base == "" {
-		base = strings.TrimSpace(os.Getenv("GATEWAY_PUBLIC_URL"))
-	}
-	return strings.TrimRight(base, "/")
 }

@@ -12,29 +12,35 @@ import (
 	"strings"
 )
 
-// MediaMessageType is the WhatsApp Cloud API message type for outbound media.
-type MediaMessageType string
+// ImageSendOpts sends a WhatsApp image; exactly one of Link or MediaID is required.
+type ImageSendOpts struct {
+	Link    string
+	MediaID string
+	Caption string
+}
 
-const (
-	MediaTypeImage    MediaMessageType = "image"
-	MediaTypeDocument MediaMessageType = "document"
-)
+// DocumentSendOpts sends a WhatsApp document; exactly one of Link or MediaID is required.
+type DocumentSendOpts struct {
+	Link     string
+	MediaID  string
+	Caption  string
+	Filename string
+}
 
-// UploadMediaResult is the Graph media id returned by POST /{phone-number-id}/media.
-type UploadMediaResult struct {
+type uploadMediaResponse struct {
 	ID string `json:"id"`
 }
 
-// UploadMedia envia binário local para a Meta e devolve o media_id.
+// UploadMedia posts a binary to Graph POST /{phone-number-id}/media.
 func (p *MetaProvider) UploadMedia(
 	ctx context.Context,
-	accessToken, phoneNumberID, mimeType, filename string,
-	data []byte,
+	accessToken, phoneNumberID, filename, mimeType string,
+	r io.Reader,
 ) (string, error) {
 	accessToken = strings.TrimSpace(accessToken)
 	phoneNumberID = strings.TrimSpace(phoneNumberID)
-	mimeType = strings.TrimSpace(mimeType)
 	filename = strings.TrimSpace(filename)
+	mimeType = strings.TrimSpace(mimeType)
 	if accessToken == "" {
 		return "", fmt.Errorf("access token is required")
 	}
@@ -44,7 +50,7 @@ func (p *MetaProvider) UploadMedia(
 	if mimeType == "" {
 		return "", fmt.Errorf("mime type is required")
 	}
-	if len(data) == 0 {
+	if r == nil {
 		return "", fmt.Errorf("media body is required")
 	}
 	if filename == "" {
@@ -59,7 +65,6 @@ func (p *MetaProvider) UploadMedia(
 	if err := writer.WriteField("type", mimeType); err != nil {
 		return "", fmt.Errorf("write type: %w", err)
 	}
-
 	header := make(textproto.MIMEHeader)
 	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, escapeMultipartFilename(filename)))
 	header.Set("Content-Type", mimeType)
@@ -67,7 +72,7 @@ func (p *MetaProvider) UploadMedia(
 	if err != nil {
 		return "", fmt.Errorf("create file part: %w", err)
 	}
-	if _, err := part.Write(data); err != nil {
+	if _, err := io.Copy(part, r); err != nil {
 		return "", fmt.Errorf("write file part: %w", err)
 	}
 	if err := writer.Close(); err != nil {
@@ -95,7 +100,7 @@ func (p *MetaProvider) UploadMedia(
 		return "", parseMetaHTTPError(resp.StatusCode, respBody)
 	}
 
-	var uploaded UploadMediaResult
+	var uploaded uploadMediaResponse
 	if err := json.Unmarshal(respBody, &uploaded); err != nil {
 		return "", fmt.Errorf("decode media upload response: %w", err)
 	}
@@ -106,18 +111,33 @@ func (p *MetaProvider) UploadMedia(
 	return id, nil
 }
 
-// SendMediaMessage envia image/document com media_id ou link HTTPS.
-func (p *MetaProvider) SendMediaMessage(
+// SendImageMessage sends type=image with link or media id.
+func (p *MetaProvider) SendImageMessage(
 	ctx context.Context,
 	accessToken, phoneNumberID, to string,
-	mediaType MediaMessageType,
-	mediaID, link, caption, filename string,
+	opts ImageSendOpts,
+) (string, error) {
+	return p.sendMediaMessage(ctx, accessToken, phoneNumberID, to, "image", opts.Link, opts.MediaID, opts.Caption, "")
+}
+
+// SendDocumentMessage sends type=document with link or media id.
+func (p *MetaProvider) SendDocumentMessage(
+	ctx context.Context,
+	accessToken, phoneNumberID, to string,
+	opts DocumentSendOpts,
+) (string, error) {
+	return p.sendMediaMessage(ctx, accessToken, phoneNumberID, to, "document", opts.Link, opts.MediaID, opts.Caption, opts.Filename)
+}
+
+func (p *MetaProvider) sendMediaMessage(
+	ctx context.Context,
+	accessToken, phoneNumberID, to, mediaType, link, mediaID, caption, filename string,
 ) (string, error) {
 	accessToken = strings.TrimSpace(accessToken)
 	phoneNumberID = strings.TrimSpace(phoneNumberID)
 	to = strings.TrimSpace(to)
-	mediaID = strings.TrimSpace(mediaID)
 	link = strings.TrimSpace(link)
+	mediaID = strings.TrimSpace(mediaID)
 	caption = strings.TrimSpace(caption)
 	filename = strings.TrimSpace(filename)
 
@@ -129,9 +149,6 @@ func (p *MetaProvider) SendMediaMessage(
 	}
 	if to == "" {
 		return "", fmt.Errorf("recipient phone number is required")
-	}
-	if mediaType != MediaTypeImage && mediaType != MediaTypeDocument {
-		return "", fmt.Errorf("unsupported media type %q", mediaType)
 	}
 	if mediaID == "" && link == "" {
 		return "", fmt.Errorf("media_id or link is required")
@@ -149,17 +166,16 @@ func (p *MetaProvider) SendMediaMessage(
 	if caption != "" {
 		mediaObj["caption"] = caption
 	}
-	if mediaType == MediaTypeDocument && filename != "" {
+	if mediaType == "document" && filename != "" {
 		mediaObj["filename"] = filename
 	}
 
 	payload := map[string]any{
 		"messaging_product": "whatsapp",
 		"to":                to,
-		"type":              string(mediaType),
-		string(mediaType):   mediaObj,
+		"type":              mediaType,
+		mediaType:           mediaObj,
 	}
-
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal media payload: %w", err)

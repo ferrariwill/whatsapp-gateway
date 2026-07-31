@@ -19,7 +19,6 @@ import (
 )
 
 func jpegFixture() []byte {
-	// Minimal JPEG (1x1) — enough for MIME sniff + Meta stub.
 	return []byte{
 		0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
 		0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43,
@@ -41,14 +40,14 @@ func jpegFixture() []byte {
 func postMultipartMedia(
 	t *testing.T,
 	srv *server,
-	apiKey, path, tenantID, to, caption, filename, mimeType string,
+	apiKey, path, tenantID, phone, caption, filename, mimeType string,
 	fileBytes []byte,
 ) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 	_ = w.WriteField("tenant_id", tenantID)
-	_ = w.WriteField("to", to)
+	_ = w.WriteField("phone_number", phone)
 	if caption != "" {
 		_ = w.WriteField("caption", caption)
 	}
@@ -88,6 +87,52 @@ func postMultipartMedia(
 	return rec
 }
 
+func TestValidateImageUploadTable(t *testing.T) {
+	cases := []struct {
+		name string
+		mime string
+		size int
+		code string
+	}{
+		{name: "jpeg ok", mime: "image/jpeg", size: 100, code: ""},
+		{name: "png ok", mime: "image/png", size: 100, code: ""},
+		{name: "gif", mime: "image/gif", size: 100, code: "unsupported_type"},
+		{name: "too large", mime: "image/jpeg", size: maxImageBytes + 1, code: "media_too_large"},
+		{name: "empty", mime: "image/jpeg", size: 0, code: "unsupported_type"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateImageUpload(tc.mime, tc.size)
+			if tc.code == "" {
+				if err != nil {
+					t.Fatalf("unexpected err=%v", err)
+				}
+				return
+			}
+			ve, ok := err.(mediaValidationError)
+			if !ok || ve.Code() != tc.code {
+				t.Fatalf("err=%v want code %s", err, tc.code)
+			}
+		})
+	}
+}
+
+func TestValidateDocumentUploadTable(t *testing.T) {
+	if err := validateDocumentUpload("application/pdf", 10); err != nil {
+		t.Fatal(err)
+	}
+	err := validateDocumentUpload("application/zip", 10)
+	ve, ok := err.(mediaValidationError)
+	if !ok || ve.Code() != "unsupported_type" {
+		t.Fatalf("got %v", err)
+	}
+	err = validateDocumentUpload("application/pdf", maxDocumentBytes+1)
+	ve, ok = err.(mediaValidationError)
+	if !ok || ve.Code() != "media_too_large" {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestQASendImageJPEGOK(t *testing.T) {
 	requireQADB(t)
 	stub := newQAMetaStub()
@@ -113,9 +158,6 @@ func TestQASendImageJPEGOK(t *testing.T) {
 	if resp.MetaMessageID == "" || resp.MessageLogID == "" {
 		t.Fatalf("response=%+v", resp)
 	}
-	if resp.MediaID == "" {
-		t.Fatalf("expected media_id from Meta upload, got %+v", resp)
-	}
 	if stub.CallCount() < 2 {
 		t.Fatalf("want upload+send meta calls, got %d", stub.CallCount())
 	}
@@ -129,6 +171,12 @@ func TestQASendImageJPEGOK(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("message_logs rows=%d", n)
+	}
+	if err := qaDB.QueryRow(`SELECT COUNT(*) FROM media_objects WHERE system_id=$1 AND tenant_id='tenant-img'`, sys.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("media_objects=%d", n)
 	}
 }
 
@@ -238,13 +286,14 @@ func TestQASendMediaRateLimited(t *testing.T) {
 	}
 }
 
-func TestQAHostedMediaCrossTenantForbidden(t *testing.T) {
+func TestQAHostedMediaCrossTenantNotFound(t *testing.T) {
 	requireQADB(t)
 	stub := newQAMetaStub()
 	srv := newQAServer(t, stub, 1000)
 	sysA := createQASystem(t, "Media A", uniqueSlug(t, "mediaa"), "")
 	sysB := createQASystem(t, "Media B", uniqueSlug(t, "mediab"), "")
 	createQAConnection(t, sysA, "tenant-a", "pn-ma", "tok-ma", "")
+	createQAConnection(t, sysB, "tenant-b", "pn-mb", "tok-mb", "")
 
 	phone := session.NormalizeWAID("5511999000666")
 	_ = repository.NewPostgresRepository(qaDB).UpsertLastInbound(
@@ -256,33 +305,37 @@ func TestQAHostedMediaCrossTenantForbidden(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("send=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var resp sendMediaResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+
+	var objectID string
+	if err := qaDB.QueryRow(
+		`SELECT id::text FROM media_objects WHERE system_id=$1 AND tenant_id='tenant-a' ORDER BY created_at DESC LIMIT 1`,
+		sysA.ID,
+	).Scan(&objectID); err != nil {
 		t.Fatal(err)
 	}
-	if resp.HostedURL == "" {
-		t.Fatal("expected hosted_url")
-	}
 
-	// Extract object id from hosted URL path /v1/media/{id}
-	uParts := strings.Split(resp.HostedURL, "/v1/media/")
-	if len(uParts) != 2 {
-		t.Fatalf("hosted_url=%s", resp.HostedURL)
-	}
-	objectID := strings.SplitN(uParts[1], "?", 2)[0]
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"/auth", nil)
+	// Wrong system API key → 404
+	req := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"?tenant_id=tenant-a", nil)
 	req.Header.Set("X-API-Key", sysB.APIKey)
 	req.SetPathValue("id", objectID)
 	cross := httptest.NewRecorder()
 	srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)).ServeHTTP(cross, req)
-	if cross.Code != http.StatusForbidden && cross.Code != http.StatusNotFound {
-		t.Fatalf("cross-tenant status=%d body=%s", cross.Code, cross.Body.String())
+	if cross.Code != http.StatusNotFound {
+		t.Fatalf("cross-system status=%d body=%s", cross.Code, cross.Body.String())
 	}
 
-	// Owner can fetch via API key.
+	// Same system, wrong tenant → 404
+	wrongTenant := httptest.NewRecorder()
+	reqWT := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"?tenant_id=tenant-b", nil)
+	reqWT.Header.Set("X-API-Key", sysA.APIKey)
+	reqWT.SetPathValue("id", objectID)
+	srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)).ServeHTTP(wrongTenant, reqWT)
+	if wrongTenant.Code != http.StatusNotFound {
+		t.Fatalf("wrong tenant status=%d body=%s", wrongTenant.Code, wrongTenant.Body.String())
+	}
+
 	own := httptest.NewRecorder()
-	reqOwn := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"/auth", nil)
+	reqOwn := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"?tenant_id=tenant-a", nil)
 	reqOwn.Header.Set("X-API-Key", sysA.APIKey)
 	reqOwn.SetPathValue("id", objectID)
 	srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)).ServeHTTP(own, reqOwn)
@@ -292,15 +345,6 @@ func TestQAHostedMediaCrossTenantForbidden(t *testing.T) {
 	body, _ := io.ReadAll(own.Body)
 	if len(body) == 0 {
 		t.Fatal("empty media body")
-	}
-
-	// Signed URL with wrong system_id must fail.
-	badSig := httptest.NewRecorder()
-	reqBad := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"?system_id="+sysB.ID+"&exp=9999999999&sig=deadbeef", nil)
-	reqBad.SetPathValue("id", objectID)
-	srv.handleGetHostedMedia(badSig, reqBad)
-	if badSig.Code != http.StatusForbidden && badSig.Code != http.StatusNotFound {
-		t.Fatalf("bad sig status=%d", badSig.Code)
 	}
 }
 
@@ -316,7 +360,7 @@ func TestQASendDocumentLinkHTTPS(t *testing.T) {
 		context.Background(), sys.ID, "tenant-doc", phone, time.Now().UTC(),
 	)
 
-	body := `{"tenant_id":"tenant-doc","to":"` + phone + `","link":"https://example.com/receita.pdf","filename":"receita.pdf","mime_type":"application/pdf"}`
+	body := `{"tenant_id":"tenant-doc","phone_number":"` + phone + `","link":"https://example.com/receita.pdf","filename":"receita.pdf"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages/document", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", sys.APIKey)

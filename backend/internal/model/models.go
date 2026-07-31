@@ -120,6 +120,8 @@ const (
 	OutboundRetryKindTemplate      OutboundRetryKind = "template"
 	OutboundRetryKindText          OutboundRetryKind = "text"
 	OutboundRetryKindPlainTemplate OutboundRetryKind = "plain_template"
+	OutboundRetryKindImage         OutboundRetryKind = "image"
+	OutboundRetryKindDocument      OutboundRetryKind = "document"
 )
 
 // OutboundRetryStatus é o ciclo de vida da fila outbound_retry_queue.
@@ -244,4 +246,18 @@ type MessageLog struct {
 	FailureCode    string     `json:"failure_code,omitempty" db:"failure_code"`
 	LastError      string     `json:"last_error,omitempty" db:"last_error"`
 	InboundPayload []byte     `json:"-" db:"inbound_payload"`
+}
+
+// MediaObject is gateway-hosted outbound media (migration 000020).
+type MediaObject struct {
+	ID           string     `json:"id" db:"id"`
+	SystemID     string     `json:"system_id" db:"system_id"`
+	TenantID     string     `json:"tenant_id" db:"tenant_id"`
+	SHA256       string     `json:"sha256" db:"sha256"`
+	MimeType     string     `json:"mime_type" db:"mime_type"`
+	ByteSize     int64      `json:"byte_size" db:"byte_size"`
+	StoragePath  string     `json:"-" db:"storage_path"`
+	OriginalName string     `json:"original_name,omitempty" db:"original_name"`
+	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty" db:"expires_at"`
 }

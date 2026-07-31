@@ -22,12 +22,12 @@ import (
 	"github.com/whatsappgetway/gateway/internal/session"
 )
 
-const maxMediaFormMemory = 32 << 20 // 32 MiB parse buffer; hard caps apply after
+const maxMediaFormMemory = 32 << 20
 
 type sendMediaJSONRequest struct {
 	TenantID      string `json:"tenant_id"`
-	To            string `json:"to"`
 	PhoneNumber   string `json:"phone_number"`
+	To            string `json:"to"` // alias
 	Link          string `json:"link"`
 	Caption       string `json:"caption"`
 	Filename      string `json:"filename"`
@@ -39,8 +39,6 @@ type sendMediaResponse struct {
 	MessageLogID  string              `json:"message_log_id"`
 	Status        model.MessageStatus `json:"status"`
 	MetaMessageID string              `json:"meta_message_id,omitempty"`
-	MediaID       string              `json:"media_id,omitempty"`
-	HostedURL     string              `json:"hosted_url,omitempty"`
 }
 
 func (s *server) handleSendImage(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +51,6 @@ func (s *server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind string) {
 	s.ensureThrottleFields()
-	s.ensureMediaStore()
 
 	system, ok := systemFromContext(r.Context())
 	if !ok {
@@ -61,7 +58,7 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 		return
 	}
 
-	tenantID, to, caption, filename, mimeType, link, appointmentID, fileBytes, err := parseSendMediaRequest(r, kind)
+	tenantID, phone, caption, filename, mimeType, link, appointmentID, fileBytes, err := parseSendMediaRequest(r, kind)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
@@ -82,7 +79,7 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 
 	if !s.enforceConnectionSpamProtection(w, r, conn, outboundAttemptAudit{
 		AppointmentID: appointmentID,
-		PhoneNumber:   to,
+		PhoneNumber:   phone,
 		TemplateName:  kind,
 	}) {
 		return
@@ -105,7 +102,7 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 		return
 	}
 
-	lastInbound, err := s.repo.GetLastInbound(r.Context(), conn.SystemID, conn.TenantID, to)
+	lastInbound, err := s.repo.GetLastInbound(r.Context(), conn.SystemID, conn.TenantID, phone)
 	if err != nil {
 		log.Printf("get last inbound %s/%s: %v", system.Slug, tenantID, err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to check 24h window"})
@@ -116,38 +113,37 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 		return
 	}
 
-	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
-	mediaType := provider.MediaTypeImage
-	if kind == "document" {
-		mediaType = provider.MediaTypeDocument
-	}
-
-	var metaMediaID string
-	var hostedURL string
-
 	if len(fileBytes) > 0 {
-		if err := validateOutboundMedia(kind, mimeType, len(fileBytes)); err != nil {
-			if ve, ok := err.(mediaValidationError); ok {
-				writeJSON(w, http.StatusUnprocessableEntity, structuredError{
-					Error: ve.message,
-					Code:  ve.code,
-				})
-				return
-			}
-			writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		var valErr error
+		if kind == "image" {
+			valErr = validateImageUpload(mimeType, len(fileBytes))
+		} else {
+			valErr = validateDocumentUpload(mimeType, len(fileBytes))
+		}
+		if valErr != nil {
+			writeMediaValidationError(w, valErr)
 			return
 		}
+	} else if err := validateMediaLink(link); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
 
-		obj, storeErr := s.mediaStore.Put(conn.SystemID, conn.TenantID, mimeType, filename, fileBytes, defaultMediaTTL)
+	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
+	var metaMediaID string
+	var mediaObjectID string
+
+	if len(fileBytes) > 0 {
+		obj, storeErr := s.persistOutboundMedia(r.Context(), conn.SystemID, conn.TenantID, mimeType, filename, fileBytes, defaultMediaTTL)
 		if storeErr != nil {
-			log.Printf("store media %s/%s: %v", system.Slug, tenantID, storeErr)
+			log.Printf("persist media %s/%s: %v", system.Slug, tenantID, storeErr)
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "failed to store media"})
 			return
 		}
-		hostedURL = s.signedMediaURL(r, obj)
+		mediaObjectID = obj.ID
 
 		uploadedID, uploadErr := metaProvider.UploadMedia(
-			r.Context(), conn.AccessToken, conn.PhoneNumberID, mimeType, filename, fileBytes,
+			r.Context(), conn.AccessToken, conn.PhoneNumberID, filename, mimeType, bytes.NewReader(fileBytes),
 		)
 		if uploadErr != nil {
 			log.Printf("upload media %s/%s: %v", system.Slug, tenantID, uploadErr)
@@ -159,36 +155,21 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 			return
 		}
 		metaMediaID = uploadedID
-	} else {
-		if err := validateMediaLink(link); err != nil {
-			writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
-			return
-		}
-		// Link path: optional mime hint only when provided (Meta fetches the URL).
-		if mimeType != "" {
-			if err := validateOutboundMedia(kind, mimeType, 1); err != nil {
-				if ve, ok := err.(mediaValidationError); ok {
-					writeJSON(w, http.StatusUnprocessableEntity, structuredError{
-						Error: ve.message,
-						Code:  ve.code,
-					})
-					return
-				}
-			}
-		}
 	}
 
-	metaMessageID, sendErr := metaProvider.SendMediaMessage(
-		r.Context(),
-		conn.AccessToken,
-		conn.PhoneNumberID,
-		to,
-		mediaType,
-		metaMediaID,
-		link,
-		caption,
-		filename,
-	)
+	var metaMessageID string
+	var sendErr error
+	if kind == "image" {
+		metaMessageID, sendErr = metaProvider.SendImageMessage(
+			r.Context(), conn.AccessToken, conn.PhoneNumberID, phone,
+			provider.ImageSendOpts{Link: link, MediaID: metaMediaID, Caption: caption},
+		)
+	} else {
+		metaMessageID, sendErr = metaProvider.SendDocumentMessage(
+			r.Context(), conn.AccessToken, conn.PhoneNumberID, phone,
+			provider.DocumentSendOpts{Link: link, MediaID: metaMediaID, Caption: caption, Filename: filename},
+		)
+	}
 
 	status := model.MessageStatusSent
 	failureCode := ""
@@ -206,6 +187,8 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 			sentContent = filename
 		} else if link != "" {
 			sentContent = link
+		} else if mediaObjectID != "" {
+			sentContent = mediaObjectID
 		} else {
 			sentContent = kind
 		}
@@ -218,7 +201,7 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 		ExternalClientID: conn.TenantID,
 		MetaMessageID:    metaMessageID,
 		AppointmentID:    appointmentID,
-		PhoneNumber:      to,
+		PhoneNumber:      phone,
 		TemplateName:     kind,
 		SentContent:      sentContent,
 		Direction:        model.MessageDirectionOutbound,
@@ -233,6 +216,18 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 	}
 
 	if sendErr != nil {
+		retryKind := model.OutboundRetryKindImage
+		if kind == "document" {
+			retryKind = model.OutboundRetryKindDocument
+		}
+		s.maybeEnqueueOutboundRetry(r.Context(), conn, messageLog, retryKind, map[string]any{
+			"phone_number": phone,
+			"link":         link,
+			"media_id":     metaMediaID,
+			"caption":      caption,
+			"filename":     filename,
+			"kind":         kind,
+		}, sendErr)
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: sendErr.Error(), Code: failureCode})
 		return
 	}
@@ -241,67 +236,11 @@ func (s *server) handleSendMedia(w http.ResponseWriter, r *http.Request, kind st
 		MessageLogID:  messageLog.ID,
 		Status:        status,
 		MetaMessageID: metaMessageID,
-		MediaID:       metaMediaID,
-		HostedURL:     hostedURL,
 	})
 }
 
-// handleGetHostedMedia serves gateway-hosted binaries via signed URL (TTL + system scope).
-// GET /v1/media/{id}?system_id=&exp=&sig=
-func (s *server) handleGetHostedMedia(w http.ResponseWriter, r *http.Request) {
-	s.ensureMediaStore()
-
-	objectID := strings.TrimSpace(r.PathValue("id"))
-	if objectID == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "media id is required"})
-		return
-	}
-
-	systemID := strings.TrimSpace(r.URL.Query().Get("system_id"))
-	exp := strings.TrimSpace(r.URL.Query().Get("exp"))
-	sig := strings.TrimSpace(r.URL.Query().Get("sig"))
-
-	obj, ok := s.mediaStore.Get(objectID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "media not found"})
-		return
-	}
-
-	// API-key path: product may fetch its own objects without signature.
-	if system, hasSystem := systemFromContext(r.Context()); hasSystem {
-		if system.ID != obj.SystemID {
-			writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden", Code: "cross_tenant"})
-			return
-		}
-		writeMediaBytes(w, obj)
-		return
-	}
-
-	if systemID == "" || !s.mediaStore.VerifySignature(systemID, objectID, exp, sig) {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "invalid or expired media signature"})
-		return
-	}
-	if systemID != obj.SystemID {
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden", Code: "cross_tenant"})
-		return
-	}
-	writeMediaBytes(w, obj)
-}
-
-func writeMediaBytes(w http.ResponseWriter, obj *mediaObject) {
-	if obj.MimeType != "" {
-		w.Header().Set("Content-Type", obj.MimeType)
-	}
-	if obj.Filename != "" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, obj.Filename))
-	}
-	w.Header().Set("Cache-Control", "private, max-age=60")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(obj.Data)
-}
-
 func parseSendMediaRequest(r *http.Request, kind string) (
-	tenantID, to, caption, filename, mimeType, link, appointmentID string,
+	tenantID, phone, caption, filename, mimeType, link, appointmentID string,
 	fileBytes []byte,
 	err error,
 ) {
@@ -311,7 +250,7 @@ func parseSendMediaRequest(r *http.Request, kind string) (
 			return "", "", "", "", "", "", "", nil, fmt.Errorf("invalid multipart body")
 		}
 		tenantID = strings.TrimSpace(r.FormValue("tenant_id"))
-		to = firstNonEmpty(r.FormValue("to"), r.FormValue("phone_number"))
+		phone = firstNonEmpty(r.FormValue("phone_number"), r.FormValue("to"))
 		caption = strings.TrimSpace(r.FormValue("caption"))
 		filename = strings.TrimSpace(r.FormValue("filename"))
 		mimeType = strings.TrimSpace(r.FormValue("mime_type"))
@@ -342,7 +281,7 @@ func parseSendMediaRequest(r *http.Request, kind string) (
 			return "", "", "", "", "", "", "", nil, fmt.Errorf("invalid request body")
 		}
 		tenantID = strings.TrimSpace(req.TenantID)
-		to = firstNonEmpty(req.To, req.PhoneNumber)
+		phone = firstNonEmpty(req.PhoneNumber, req.To)
 		caption = strings.TrimSpace(req.Caption)
 		filename = strings.TrimSpace(req.Filename)
 		mimeType = strings.TrimSpace(req.MimeType)
@@ -350,12 +289,12 @@ func parseSendMediaRequest(r *http.Request, kind string) (
 		appointmentID = strings.TrimSpace(req.AppointmentID)
 	}
 
-	to = session.NormalizeWAID(to)
+	phone = session.NormalizeWAID(phone)
 	if appointmentID == "" {
 		appointmentID = "-"
 	}
-	if tenantID == "" || to == "" {
-		return "", "", "", "", "", "", "", nil, fmt.Errorf("tenant_id and to (or phone_number) are required")
+	if tenantID == "" || phone == "" {
+		return "", "", "", "", "", "", "", nil, fmt.Errorf("tenant_id and phone_number are required")
 	}
 	if len(fileBytes) == 0 && link == "" {
 		return "", "", "", "", "", "", "", nil, fmt.Errorf("provide HTTPS link or multipart file")
@@ -366,7 +305,7 @@ func parseSendMediaRequest(r *http.Request, kind string) (
 	if kind == "document" && filename == "" && len(fileBytes) > 0 {
 		filename = "document"
 	}
-	return tenantID, to, caption, filename, mimeType, link, appointmentID, fileBytes, nil
+	return tenantID, phone, caption, filename, mimeType, link, appointmentID, fileBytes, nil
 }
 
 func validateMediaLink(link string) error {
@@ -404,37 +343,7 @@ func sniffMediaMIME(kind, filename string, data []byte) string {
 	return "application/pdf"
 }
 
-func (s *server) ensureMediaStore() {
-	if s.mediaStore == nil {
-		s.mediaStore = newMediaStore(mediaSigningSecret())
-	}
-}
-
-func (s *server) signedMediaURL(r *http.Request, obj *mediaObject) string {
-	exp := time.Now().UTC().Add(defaultMediaTTL)
-	expUnix, sig := s.mediaStore.SignURLQuery(obj.SystemID, obj.ID, exp)
-	base := publicBaseURL()
-	if base == "" {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-			scheme = proto
-		}
-		base = scheme + "://" + r.Host
-	}
-	q := url.Values{}
-	q.Set("system_id", obj.SystemID)
-	q.Set("exp", expUnix)
-	q.Set("sig", sig)
-	return fmt.Sprintf("%s/v1/media/%s?%s", base, obj.ID, q.Encode())
-}
-
-// handleAdminSendMediaTest is a minimal HTMX test form for ops.
 func (s *server) handleAdminSendMediaTest(w http.ResponseWriter, r *http.Request) {
-	s.ensureMediaStore()
-
 	if err := r.ParseMultipartForm(maxMediaFormMemory); err != nil {
 		http.Error(w, "invalid multipart body", http.StatusBadRequest)
 		return
@@ -442,15 +351,15 @@ func (s *server) handleAdminSendMediaTest(w http.ResponseWriter, r *http.Request
 
 	systemID := strings.TrimSpace(r.FormValue("system_id"))
 	tenantID := strings.TrimSpace(r.FormValue("tenant_id"))
-	to := session.NormalizeWAID(firstNonEmpty(r.FormValue("to"), r.FormValue("phone_number")))
+	phone := session.NormalizeWAID(firstNonEmpty(r.FormValue("phone_number"), r.FormValue("to")))
 	kind := strings.ToLower(strings.TrimSpace(r.FormValue("type")))
 	caption := strings.TrimSpace(r.FormValue("caption"))
 	filename := strings.TrimSpace(r.FormValue("filename"))
 	if kind != "document" {
 		kind = "image"
 	}
-	if systemID == "" || tenantID == "" || to == "" {
-		writeAdminMediaResult(w, false, "system_id, tenant_id e to são obrigatórios", "")
+	if systemID == "" || tenantID == "" || phone == "" {
+		writeAdminMediaResult(w, false, "system_id, tenant_id e phone_number são obrigatórios", "")
 		return
 	}
 
@@ -479,7 +388,7 @@ func (s *server) handleAdminSendMediaTest(w http.ResponseWriter, r *http.Request
 		mimeType = sniffMediaMIME(kind, filename, data)
 	}
 
-	req, err := newAdminMediaAPIRequest(r.Context(), *system, kind, tenantID, to, caption, filename, mimeType, data)
+	req, err := newAdminMediaAPIRequest(r.Context(), *system, kind, tenantID, phone, caption, filename, mimeType, data)
 	if err != nil {
 		writeAdminMediaResult(w, false, "falha ao montar request", err.Error())
 		return
@@ -497,13 +406,13 @@ func (s *server) handleAdminSendMediaTest(w http.ResponseWriter, r *http.Request
 func newAdminMediaAPIRequest(
 	ctx context.Context,
 	system model.System,
-	kind, tenantID, to, caption, filename, mimeType string,
+	kind, tenantID, phone, caption, filename, mimeType string,
 	data []byte,
 ) (*http.Request, error) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 	_ = writer.WriteField("tenant_id", tenantID)
-	_ = writer.WriteField("to", to)
+	_ = writer.WriteField("phone_number", phone)
 	if caption != "" {
 		_ = writer.WriteField("caption", caption)
 	}

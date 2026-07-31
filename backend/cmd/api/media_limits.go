@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 )
 
-// Meta Cloud API documented caps (validated locally before Graph).
 const (
-	maxImageBytes    = 5 * 1024 * 1024  // 5 MiB
-	maxDocumentBytes = 100 * 1024 * 1024 // 100 MiB
+	maxImageBytes    = 5 * 1024 * 1024
+	maxDocumentBytes = 100 * 1024 * 1024
 )
 
 var allowedImageMIME = map[string]struct{}{
@@ -27,13 +27,20 @@ var allowedDocumentMIME = map[string]struct{}{
 	"text/plain": {},
 }
 
-func validateOutboundMedia(kind string, mimeType string, size int) error {
+func validateImageUpload(mimeType string, size int) error {
+	return validateOutboundMedia("image", mimeType, size)
+}
+
+func validateDocumentUpload(mimeType string, size int) error {
+	return validateOutboundMedia("document", mimeType, size)
+}
+
+func validateOutboundMedia(kind, mimeType string, size int) error {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
 	if mimeType == "" {
 		return mediaValidationError{code: "unsupported_type", message: "mime type is required"}
 	}
-
 	switch kind {
 	case "image":
 		if _, ok := allowedImageMIME[mimeType]; !ok {
@@ -63,10 +70,13 @@ type mediaValidationError struct {
 	message string
 }
 
-func (e mediaValidationError) Error() string {
-	return e.message
-}
+func (e mediaValidationError) Error() string { return e.message }
+func (e mediaValidationError) Code() string  { return e.code }
 
-func (e mediaValidationError) Code() string {
-	return e.code
+func writeMediaValidationError(w http.ResponseWriter, err error) {
+	if ve, ok := err.(mediaValidationError); ok {
+		writeJSON(w, http.StatusUnprocessableEntity, structuredError{Error: ve.message, Code: ve.code})
+		return
+	}
+	writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 }
