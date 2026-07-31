@@ -290,17 +290,21 @@ func TestQAHostedMediaCrossTenantNotFound(t *testing.T) {
 	requireQADB(t)
 	stub := newQAMetaStub()
 	srv := newQAServer(t, stub, 1000)
-	sysA := createQASystem(t, "Media A", uniqueSlug(t, "mediaa"), "")
-	sysB := createQASystem(t, "Media B", uniqueSlug(t, "mediab"), "")
-	createQAConnection(t, sysA, "tenant-a", "pn-ma", "tok-ma", "")
-	createQAConnection(t, sysB, "tenant-b", "pn-mb", "tok-mb", "")
+
+	// Same product (one API key), two tenants — critério 3 do card.
+	sys := createQASystem(t, "Media Iso", uniqueSlug(t, "mediaiso"), "")
+	createQAConnection(t, sys, "tenant-a", "pn-iso-a", "tok-iso-a", "")
+	createQAConnection(t, sys, "tenant-b", "pn-iso-b", "tok-iso-b", "")
+
+	otherSys := createQASystem(t, "Media Other", uniqueSlug(t, "mediaoth"), "")
+	createQAConnection(t, otherSys, "tenant-x", "pn-iso-x", "tok-iso-x", "")
 
 	phone := session.NormalizeWAID("5511999000666")
 	_ = repository.NewPostgresRepository(qaDB).UpsertLastInbound(
-		context.Background(), sysA.ID, "tenant-a", phone, time.Now().UTC(),
+		context.Background(), sys.ID, "tenant-a", phone, time.Now().UTC(),
 	)
 
-	rec := postMultipartMedia(t, srv, sysA.APIKey, "/v1/messages/image",
+	rec := postMultipartMedia(t, srv, sys.APIKey, "/v1/messages/image",
 		"tenant-a", phone, "", "a.jpg", "image/jpeg", jpegFixture())
 	if rec.Code != http.StatusOK {
 		t.Fatalf("send=%d body=%s", rec.Code, rec.Body.String())
@@ -309,36 +313,32 @@ func TestQAHostedMediaCrossTenantNotFound(t *testing.T) {
 	var objectID string
 	if err := qaDB.QueryRow(
 		`SELECT id::text FROM media_objects WHERE system_id=$1 AND tenant_id='tenant-a' ORDER BY created_at DESC LIMIT 1`,
-		sysA.ID,
+		sys.ID,
 	).Scan(&objectID); err != nil {
 		t.Fatal(err)
 	}
 
-	// Wrong system API key → 404
-	req := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"?tenant_id=tenant-a", nil)
-	req.Header.Set("X-API-Key", sysB.APIKey)
-	req.SetPathValue("id", objectID)
-	cross := httptest.NewRecorder()
-	srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)).ServeHTTP(cross, req)
-	if cross.Code != http.StatusNotFound {
-		t.Fatalf("cross-system status=%d body=%s", cross.Code, cross.Body.String())
+	getMedia := func(apiKey, tenantID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"?tenant_id="+tenantID, nil)
+		req.Header.Set("X-API-Key", apiKey)
+		req.SetPathValue("id", objectID)
+		rec := httptest.NewRecorder()
+		srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)).ServeHTTP(rec, req)
+		return rec
 	}
 
-	// Same system, wrong tenant → 404
-	wrongTenant := httptest.NewRecorder()
-	reqWT := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"?tenant_id=tenant-b", nil)
-	reqWT.Header.Set("X-API-Key", sysA.APIKey)
-	reqWT.SetPathValue("id", objectID)
-	srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)).ServeHTTP(wrongTenant, reqWT)
-	if wrongTenant.Code != http.StatusNotFound {
-		t.Fatalf("wrong tenant status=%d body=%s", wrongTenant.Code, wrongTenant.Body.String())
+	// Same system/API key, tenant B → 404 (sem vazamento de existência).
+	if code := getMedia(sys.APIKey, "tenant-b").Code; code != http.StatusNotFound {
+		t.Fatalf("same-system tenant-b status=%d want 404", code)
 	}
 
-	own := httptest.NewRecorder()
-	reqOwn := httptest.NewRequest(http.MethodGet, "/v1/media/"+objectID+"?tenant_id=tenant-a", nil)
-	reqOwn.Header.Set("X-API-Key", sysA.APIKey)
-	reqOwn.SetPathValue("id", objectID)
-	srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetHostedMedia)).ServeHTTP(own, reqOwn)
+	// Outro system → 404.
+	if code := getMedia(otherSys.APIKey, "tenant-a").Code; code != http.StatusNotFound {
+		t.Fatalf("cross-system status=%d want 404", code)
+	}
+
+	// Owner tenant A → 200 + bytes.
+	own := getMedia(sys.APIKey, "tenant-a")
 	if own.Code != http.StatusOK {
 		t.Fatalf("owner status=%d body=%s", own.Code, own.Body.String())
 	}
