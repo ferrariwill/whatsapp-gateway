@@ -17,18 +17,22 @@ import (
 )
 
 type saasWebhookPayload struct {
-	SystemID      string           `json:"system_id"`
-	SistemaOrigem string           `json:"sistema_origem"`
-	TenantID      string           `json:"tenant_id"`
-	MetaMessageID string           `json:"meta_message_id,omitempty"`
-	PhoneNumber   string           `json:"phone_number"`
-	Text          string           `json:"text"`
-	EventType     string           `json:"event_type"`
-	Action        string           `json:"action,omitempty"`
-	Media         *inboundMedia    `json:"media,omitempty"`
-	Location      *inboundLocation `json:"location,omitempty"`
-	Reaction      *inboundReaction `json:"reaction,omitempty"`
-	Replay        bool             `json:"replay,omitempty"`
+	SystemID         string           `json:"system_id"`
+	SistemaOrigem    string           `json:"sistema_origem"`
+	TenantID         string           `json:"tenant_id"`
+	MetaMessageID    string           `json:"meta_message_id,omitempty"`
+	PhoneNumber      string           `json:"phone_number"`
+	From             string           `json:"from,omitempty"`
+	Text             string           `json:"text"`
+	EventType        string           `json:"event_type"`
+	Action           string           `json:"action,omitempty"`
+	ReplyID          string           `json:"reply_id,omitempty"`
+	ReplyTitle       string           `json:"reply_title,omitempty"`
+	ContextMessageID string           `json:"context_message_id,omitempty"`
+	Media            *inboundMedia    `json:"media,omitempty"`
+	Location         *inboundLocation `json:"location,omitempty"`
+	Reaction         *inboundReaction `json:"reaction,omitempty"`
+	Replay           bool             `json:"replay,omitempty"`
 }
 
 type unifiedMetaWebhookPayload struct {

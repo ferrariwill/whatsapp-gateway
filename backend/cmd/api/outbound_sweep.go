@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"time"
@@ -139,6 +140,14 @@ func (s *server) executeOutboundRetry(
 		name, _ := payload["template_name"].(string)
 		lang, _ := payload["language_code"].(string)
 		return meta.SendPlainTemplate(ctx, conn.AccessToken, conn.PhoneNumberID, phone, name, lang)
+	case model.OutboundRetryKindInteractive:
+		phone, _ := payload["phone_number"].(string)
+		rawInteractive, _ := json.Marshal(payload["interactive"])
+		var interactive provider.InteractivePayload
+		if err := json.Unmarshal(rawInteractive, &interactive); err != nil {
+			return "", fmt.Errorf("decode interactive retry payload: %w", err)
+		}
+		return meta.SendInteractive(ctx, conn.AccessToken, conn.PhoneNumberID, phone, interactive)
 	default:
 		phone, _ := payload["phone_number"].(string)
 		name, _ := payload["template_name"].(string)
