@@ -133,6 +133,7 @@ func TestQAUsageMeterDeliveredIdempotent(t *testing.T) {
 		"tenant_id":     "salon-42",
 		"phone_number":  "5511988887777",
 		"template_name": "confirma_agendamento",
+		"variables":     []string{"Ana", "10:00"},
 	})
 	if sendRec.Code != http.StatusOK {
 		t.Fatalf("send status=%d body=%s", sendRec.Code, sendRec.Body.String())
@@ -190,12 +191,14 @@ func TestQAUsageMeterCrossSystemIsolation(t *testing.T) {
 	createQAConnection(t, sysB, "shared-tenant", "phone-b", "token-b", "")
 
 	if rec := qaPostSendNotification(t, srv, sysA.APIKey, map[string]any{
-		"tenant_id": "shared-tenant", "phone_number": "5511988887777", "template_name": "tpl_a",
+		"tenant_id": "shared-tenant", "phone_number": "5511988887777",
+		"template_name": "confirma_agendamento", "variables": []string{"Ana", "10:00"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("A send: %d %s", rec.Code, rec.Body.String())
 	}
 	if rec := qaPostSendNotification(t, srv, sysB.APIKey, map[string]any{
-		"tenant_id": "shared-tenant", "phone_number": "5511988887777", "template_name": "tpl_b",
+		"tenant_id": "shared-tenant", "phone_number": "5511988887777",
+		"template_name": "confirma_agendamento", "variables": []string{"Ana", "10:00"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("B send: %d %s", rec.Code, rec.Body.String())
 	}
@@ -226,10 +229,12 @@ func TestQAUsageExportCSVColumnsAndFilter(t *testing.T) {
 	createQAConnection(t, sysB, "t-b", "phone-b", "token-b", "")
 
 	_ = qaPostSendNotification(t, srv, sysA.APIKey, map[string]any{
-		"tenant_id": "t-a", "phone_number": "5511988887777", "template_name": "tpl",
+		"tenant_id": "t-a", "phone_number": "5511988887777",
+		"template_name": "confirma_agendamento", "variables": []string{"Ana", "10:00"},
 	})
 	_ = qaPostSendNotification(t, srv, sysB.APIKey, map[string]any{
-		"tenant_id": "t-b", "phone_number": "5511988887777", "template_name": "tpl",
+		"tenant_id": "t-b", "phone_number": "5511988887777",
+		"template_name": "confirma_agendamento", "variables": []string{"Ana", "10:00"},
 	})
 
 	from, to := qaUsageDayBounds()
@@ -283,7 +288,8 @@ func TestQAUsageMeterRateLimitIncrementsErrors4xxNotSent(t *testing.T) {
 	createQAConnection(t, sys, "salon-42", "phone-rl", "token-rl", "")
 
 	payload := map[string]any{
-		"tenant_id": "salon-42", "phone_number": "5511988887777", "template_name": "confirma",
+		"tenant_id": "salon-42", "phone_number": "5511988887777",
+		"template_name": "confirma_agendamento", "variables": []string{"Ana", "10:00"},
 	}
 	if rec := qaPostSendNotification(t, srv, sys.APIKey, payload); rec.Code != http.StatusOK {
 		t.Fatalf("accepted status=%d", rec.Code)
@@ -318,7 +324,8 @@ func TestQAUsageMeterMeta5xxIncrementsErrors5xxNotSent(t *testing.T) {
 	createQAConnection(t, sys, "salon-42", "phone-5xx", "token-5xx", "")
 
 	rec := qaPostSendNotification(t, srv, sys.APIKey, map[string]any{
-		"tenant_id": "salon-42", "phone_number": "5511988887777", "template_name": "confirma",
+		"tenant_id": "salon-42", "phone_number": "5511988887777",
+		"template_name": "confirma_agendamento", "variables": []string{"Ana", "10:00"},
 	})
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status=%d, want 502 body=%s", rec.Code, rec.Body.String())
