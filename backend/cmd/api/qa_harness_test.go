@@ -165,7 +165,7 @@ func requireQADB(t *testing.T) {
 
 func resetQAData(t *testing.T) {
 	t.Helper()
-	_, err := qaDB.Exec(`TRUNCATE oauth_state_nonces, message_logs, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
+	_, err := qaDB.Exec(`TRUNCATE outbound_retry_queue, rate_limit_audit, contact_sessions, webhook_event_dedupe, whatsapp_templates, message_delivery_events, oauth_state_nonces, message_logs, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset qa data: %v", err)
 	}
@@ -297,6 +297,9 @@ func newQAServerWithRelay(
 	t.Helper()
 	t.Setenv("ADMIN_PHONE_NUMBER", "")
 	t.Setenv("MOTHER_SYSTEM_WEBHOOK_URL", "")
+	// Commercial token-bucket must not starve existing load/isolation tests.
+	t.Setenv("RATE_LIMIT_DEFAULT_RPS", "10000")
+	t.Setenv("RATE_LIMIT_DEFAULT_BURST", "100000")
 	if strings.TrimSpace(os.Getenv("META_APP_SECRET")) == "" {
 		t.Setenv("META_APP_SECRET", "qa-app-secret")
 	}
@@ -312,14 +315,16 @@ func newQAServerWithRelay(
 
 	repo := repository.NewPostgresRepository(qaDB)
 	return &server{
-		repo:         repo,
-		jwtSecret:    []byte("qa-jwt-secret-with-at-least-32-chars!!"),
-		metaClient:   &http.Client{Transport: stub, Timeout: 10 * time.Second},
-		metaAPIVer:   "v21.0",
-		usage:        service.NewUsageService(repo),
-		rateLimiter:  security.NewRateLimiter(maxMessagesPerMinute, 15*time.Minute),
-		relay:        pool,
-		rejectionLog: newLogSampler(defaultRejectionLogInterval),
+		repo:           repo,
+		jwtSecret:      []byte("qa-jwt-secret-with-at-least-32-chars!!"),
+		metaClient:     &http.Client{Transport: stub, Timeout: 10 * time.Second},
+		metaAPIVer:     "v21.0",
+		usage:          service.NewUsageService(repo),
+		rateLimiter:    security.NewRateLimiter(maxMessagesPerMinute, 15*time.Minute),
+		tokenBucket:    security.NewTokenBucketLimiter(),
+		rateLimitCache: &sync.Map{},
+		relay:          pool,
+		rejectionLog:   newLogSampler(defaultRejectionLogInterval),
 	}
 }
 
@@ -358,6 +363,14 @@ func createQASystem(t *testing.T, name, slug, webhookURL string) qaSystem {
 	if err := repository.NewPostgresRepository(qaDB).CreateSystem(context.Background(), &system); err != nil {
 		t.Fatalf("create system %s: %v", slug, err)
 	}
+	// Commercial token-bucket defaults from migration (5/10) would starve load tests.
+	if _, err := qaDB.Exec(`
+		UPDATE systems
+		SET default_rate_limit_rps = 10000, default_rate_limit_burst = 100000
+		WHERE id = $1
+	`, system.ID); err != nil {
+		t.Fatalf("raise rate limit defaults for %s: %v", slug, err)
+	}
 	return qaSystem{System: system, APIKey: apiKey}
 }
 
@@ -376,13 +389,52 @@ func createQAConnection(
 		PhoneNumberID:       phoneNumberID,
 		AccessToken:         accessToken,
 		WebhookURL:          webhookURL,
+		WebhookSecret:       "qa-webhook-secret-" + tenantID,
 		WhatsAppPhoneNumber: "5511" + phoneNumberID,
 		Status:              model.ConnectionStatusActive,
 	}
 	if err := repository.NewPostgresRepository(qaDB).CreateWhatsAppConnection(context.Background(), conn); err != nil {
 		t.Fatalf("create connection %s/%s: %v", system.Slug, tenantID, err)
 	}
+	// Catálogo local padrão usado pelos testes de send (confirma_agendamento, 2 params).
+	seedQAApprovedTemplate(t, conn, "confirma_agendamento", "pt_BR", 2)
 	return conn
+}
+
+func seedQAApprovedTemplate(
+	t *testing.T,
+	conn *model.WhatsAppConnection,
+	name, language string,
+	expectedBodyParams int,
+) {
+	t.Helper()
+	body := "Oi"
+	if expectedBodyParams > 0 {
+		parts := make([]string, expectedBodyParams)
+		for i := range parts {
+			parts[i] = fmt.Sprintf("{{%d}}", i+1)
+		}
+		body = strings.Join(parts, " ")
+	}
+	components := []byte(fmt.Sprintf(`[{"type":"BODY","text":%q}]`, body))
+	now := time.Now().UTC()
+	tpl := &model.WhatsAppTemplate{
+		SystemID:           conn.SystemID,
+		TenantID:           conn.TenantID,
+		ConnectionID:       conn.ID,
+		WabaID:             conn.WabaID,
+		MetaID:             "meta-tpl-" + name + "-" + language,
+		Name:               name,
+		Language:           language,
+		Category:           "UTILITY",
+		Status:             model.TemplateStatusApproved,
+		ComponentsJSON:     components,
+		ExpectedBodyParams: expectedBodyParams,
+		SyncedAt:           &now,
+	}
+	if err := repository.NewPostgresRepository(qaDB).UpsertWhatsAppTemplate(context.Background(), tpl); err != nil {
+		t.Fatalf("seed template %s: %v", name, err)
+	}
 }
 
 // ----------------------------------------------------------------------------

@@ -43,28 +43,12 @@
 
       <div id="system-api-key-reveal"></div>
 
-      <div class="overflow-x-auto rounded-xl border border-slate-800">
-        <table class="min-w-full divide-y divide-slate-800 text-sm">
-          <thead class="bg-slate-950/80">
-            <tr>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Nome</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Slug</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">API Key (hash)</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Webhook URL</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Cadastrado em</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Ações</th>
-            </tr>
-          </thead>
-          <tbody id="systems-tbody" class="divide-y divide-slate-800 bg-slate-900/30">
-            {{range .Systems}}
-            {{template "system_row.html" .}}
-            {{else}}
-            <tr id="systems-empty-row">
-              <td colspan="6" class="px-4 py-8 text-center text-slate-500">Nenhuma aplicação cadastrada. Crie a primeira antes de vincular canais.</td>
-            </tr>
-            {{end}}
-          </tbody>
-        </table>
+      <div id="systems-list" class="overflow-hidden rounded-xl border border-slate-800">
+        {{range .Systems}}
+        {{template "system_row.html" .}}
+        {{else}}
+        <div id="systems-empty-row" class="px-4 py-8 text-center text-sm text-slate-500">Nenhuma aplicação cadastrada. Crie a primeira antes de vincular canais.</div>
+        {{end}}
       </div>
     </section>
 
@@ -83,32 +67,12 @@
         </button>
       </div>
 
-      <div class="overflow-x-auto rounded-xl border border-slate-800">
-        <table class="min-w-full divide-y divide-slate-800 text-sm">
-          <thead class="bg-slate-950/80">
-            <tr>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Aplicação mãe</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Tenant ID</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">WABA ID</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Phone Number ID</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Telefone</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Token (hint)</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Webhook SaaS</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Status</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Cadastrado em</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Ações</th>
-            </tr>
-          </thead>
-          <tbody id="connections-tbody" class="divide-y divide-slate-800 bg-slate-900/30">
-            {{range .Connections}}
-            {{template "connection_row.html" .}}
-            {{else}}
-            <tr id="connections-empty-row">
-              <td colspan="10" class="px-4 py-8 text-center text-slate-500">Nenhuma conexão cadastrada. Crie a primeira para habilitar POST /send-notification.</td>
-            </tr>
-            {{end}}
-          </tbody>
-        </table>
+      <div id="connections-list" class="overflow-hidden rounded-xl border border-slate-800">
+        {{range .Connections}}
+        {{template "connection_row.html" .}}
+        {{else}}
+        <div id="connections-empty-row" class="px-4 py-8 text-center text-sm text-slate-500">Nenhuma conexão cadastrada. Crie a primeira para habilitar POST /send-notification.</div>
+        {{end}}
       </div>
     </section>
 
@@ -129,30 +93,12 @@
         </button>
       </div>
 
-      <div class="overflow-x-auto rounded-xl border border-slate-800">
-        <table class="min-w-full divide-y divide-slate-800 text-sm">
-          <thead class="bg-slate-950/80">
-            <tr>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Aplicação</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Rótulo do canal</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Cliente externo</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Telefone</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Phone Number ID</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Status</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Cadastrado em</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Ações</th>
-            </tr>
-          </thead>
-          <tbody id="channels-tbody" class="divide-y divide-slate-800 bg-slate-900/30">
-            {{range .Channels}}
-            {{template "channel_row.html" .}}
-            {{else}}
-            <tr id="channels-empty-row">
-              <td colspan="8" class="px-4 py-8 text-center text-slate-500">Nenhum canal vinculado ainda.</td>
-            </tr>
-            {{end}}
-          </tbody>
-        </table>
+      <div id="channels-list" class="overflow-hidden rounded-xl border border-slate-800">
+        {{range .Channels}}
+        {{template "channel_row.html" .}}
+        {{else}}
+        <div id="channels-empty-row" class="px-4 py-8 text-center text-sm text-slate-500">Nenhum canal vinculado ainda.</div>
+        {{end}}
       </div>
     </section>
 
@@ -198,55 +144,12 @@
         <p class="text-sm text-slate-400">Últimos 50 registros — templates enviados, conteúdo e respostas recebidas. Linhas destacadas indicam possível spam (&gt;50 envios em 10 min).</p>
       </div>
 
-      <div class="overflow-x-auto rounded-xl border border-slate-800">
-        <table class="min-w-full divide-y divide-slate-800 text-sm">
-          <thead class="bg-slate-950/80">
-            <tr>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Data</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Aplicação</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Cliente</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Direção</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Telefone</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Template / Tipo</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Status / Motivo</th>
-              <th class="px-4 py-3 text-left font-medium text-slate-400">Conteúdo</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-800 bg-slate-900/30">
-            {{range .AuditLogs}}
-            <tr class="{{if .SpamAlert}}bg-amber-500/10 ring-1 ring-inset ring-amber-500/30{{end}}">
-              <td class="px-4 py-3 text-slate-400 whitespace-nowrap">{{.CreatedAt}}</td>
-              <td class="px-4 py-3 text-slate-300">{{.SystemName}}</td>
-              <td class="px-4 py-3 font-mono text-slate-300">{{if .ExternalClientID}}{{.ExternalClientID}}{{else}}—{{end}}</td>
-              <td class="px-4 py-3">
-                {{if .IsInbound}}
-                <span class="inline-flex rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-400 ring-1 ring-emerald-500/20">Entrada</span>
-                {{else}}
-                <span class="inline-flex rounded-full bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-400 ring-1 ring-blue-500/20">Saída</span>
-                {{end}}
-                {{if .SpamAlert}}
-                <span class="ml-1 inline-flex rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-400 ring-1 ring-red-500/20">⚠ Spam</span>
-                {{end}}
-              </td>
-              <td class="px-4 py-3 font-mono text-slate-200">{{.PhoneNumber}}</td>
-              <td class="px-4 py-3 text-slate-300">{{.TemplateLabel}}</td>
-              <td class="px-4 py-3 text-slate-300">
-                {{if .IsRejected}}
-                <span class="inline-flex rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-300 ring-1 ring-amber-500/20">Recusado</span>
-                {{else}}
-                <span class="font-mono text-xs">{{.Status}}</span>
-                {{end}}
-                {{if .FailureReason}}<div class="mt-1 font-mono text-xs text-slate-500">{{.FailureReason}}</div>{{end}}
-              </td>
-              <td class="px-4 py-3 text-slate-300 max-w-md truncate" title="{{.Content}}">{{.Content}}</td>
-            </tr>
-            {{else}}
-            <tr>
-              <td colspan="8" class="px-4 py-8 text-center text-slate-500">Nenhum registro de auditoria ainda.</td>
-            </tr>
-            {{end}}
-          </tbody>
-        </table>
+      <div id="audit-list" class="overflow-hidden rounded-xl border border-slate-800">
+        {{range .AuditLogs}}
+        {{template "audit_row.html" .}}
+        {{else}}
+        <div class="px-4 py-8 text-center text-sm text-slate-500">Nenhum registro de auditoria ainda.</div>
+        {{end}}
       </div>
     </section>
   </main>
@@ -264,7 +167,7 @@
 
     <form
       hx-post="/admin/channels"
-      hx-target="#channels-tbody"
+      hx-target="#channels-list"
       hx-swap="beforeend"
       hx-on::after-request="if(event.detail.successful){ closeModal('add-channel-modal'); this.reset(); document.getElementById('channels-empty-row')?.remove(); }"
       class="space-y-4"
@@ -322,7 +225,7 @@
     </div>
     <form
       hx-post="/admin/systems"
-      hx-target="#systems-tbody"
+      hx-target="#systems-list"
       hx-swap="beforeend"
       hx-on::after-request="if(event.detail.successful){ closeModal('add-system-modal'); this.reset(); document.getElementById('systems-empty-row')?.remove(); }"
       class="space-y-4"
@@ -446,7 +349,7 @@
     </div>
     <form
       hx-post="/admin/connections"
-      hx-target="#connections-tbody"
+      hx-target="#connections-list"
       hx-swap="beforeend"
       hx-on::after-request="if(event.detail.successful){ closeModal('add-connection-modal'); this.reset(); document.getElementById('connections-empty-row')?.remove(); }"
       class="space-y-4"
