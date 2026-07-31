@@ -34,6 +34,13 @@ type loginPageData struct {
 	pageData
 }
 
+type embeddedSignupResultData struct {
+	pageData
+	Success bool
+	Message string
+	Detail  string
+}
+
 type dashboardPageData struct {
 	pageData
 
@@ -167,6 +174,8 @@ func resolveTemplatesDir() string {
 	}
 
 	candidates := []string{
+
+		filepath.Join("..", "..", "..", "frontend", "templates"),
 
 		filepath.Join("..", "..", "frontend", "templates"),
 
@@ -425,6 +434,10 @@ func loginErrorMessage(code string) string {
 	case "invalid":
 
 		return "E-mail ou senha inválidos."
+
+	case "session":
+
+		return "Sua sessão expirou. Faça login novamente."
 
 	case "internal":
 

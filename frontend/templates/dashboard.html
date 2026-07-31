@@ -26,6 +26,17 @@
   </header>
 
   <main class="mx-auto max-w-7xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
+    <section class="rounded-2xl border border-sky-500/20 bg-slate-900/50 p-6 ring-1 ring-sky-500/10">
+      <h2 class="text-lg font-semibold text-white">Como conectar um tenant</h2>
+      <p class="mt-1 text-sm text-slate-400">Passos operacionais para ativar WhatsApp de um cliente — não é só o endpoint.</p>
+      <ol class="mt-4 list-decimal space-y-2 pl-5 text-sm text-slate-300">
+        <li>Cadastre a <strong class="font-medium text-white">aplicação mãe</strong> (Systems) e guarde a API Key exibida na criação.</li>
+        <li>No SaaS, mint o <code class="rounded bg-slate-950 px-1.5 py-0.5 text-xs text-emerald-300">state</code> com <code class="rounded bg-slate-950 px-1.5 py-0.5 text-xs text-emerald-300">POST /v1/embedded-signup/state</code> (X-API-Key).</li>
+        <li>Abra o Embedded Signup da Meta com esse state; o callback cria/atualiza a conexão no gateway.</li>
+        <li>Alternativa: use <strong class="font-medium text-white">+ Nova conexão</strong> para cadastrar WABA, Phone Number ID e token manualmente.</li>
+      </ol>
+    </section>
+
     <section class="rounded-2xl border border-slate-800 bg-slate-900/50 p-6">
       <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -59,9 +70,11 @@
           <p class="text-sm text-slate-400">Credenciais Meta por tenant — token, WABA e Phone Number ID ficam no banco, não no .env.</p>
         </div>
         <button
+          id="add-connection-btn"
           type="button"
           onclick="openModal('add-connection-modal')"
-          class="inline-flex items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400"
+          {{if not .HasSystems}}disabled title="Cadastre uma aplicação primeiro"{{end}}
+          class="inline-flex items-center justify-center rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
         >
           + Nova conexão
         </button>

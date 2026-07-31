@@ -435,6 +435,8 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 }
 
+const loginSessionExpiredPath = "/login?error=session"
+
 func (s *server) jwtMiddleware(next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -445,7 +447,7 @@ func (s *server) jwtMiddleware(next http.Handler) http.Handler {
 
 			if isHTMX(r) {
 
-				w.Header().Set("HX-Redirect", "/login")
+				w.Header().Set("HX-Redirect", loginSessionExpiredPath)
 
 				w.WriteHeader(http.StatusUnauthorized)
 
@@ -453,7 +455,7 @@ func (s *server) jwtMiddleware(next http.Handler) http.Handler {
 
 			}
 
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			http.Redirect(w, r, loginSessionExpiredPath, http.StatusSeeOther)
 
 			return
 
@@ -465,7 +467,7 @@ func (s *server) jwtMiddleware(next http.Handler) http.Handler {
 
 			if isHTMX(r) {
 
-				w.Header().Set("HX-Redirect", "/login")
+				w.Header().Set("HX-Redirect", loginSessionExpiredPath)
 
 				w.WriteHeader(http.StatusUnauthorized)
 
@@ -473,7 +475,7 @@ func (s *server) jwtMiddleware(next http.Handler) http.Handler {
 
 			}
 
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			http.Redirect(w, r, loginSessionExpiredPath, http.StatusSeeOther)
 
 			return
 
