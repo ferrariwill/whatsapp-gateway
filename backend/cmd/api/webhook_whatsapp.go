@@ -128,7 +128,10 @@ func (s *server) processWebhookPayloadAsync(
 	conn *model.WhatsAppConnection,
 	payload unifiedMetaWebhookPayload,
 ) {
+	// Billing (delivered → message_logs) e fan-out de status ao produto são
+	// caminhos paralelos; o fan-out não bloqueia o 200 à Meta (já estamos no pool).
 	s.processDeliveryStatusesFromPayload(ctx, conn, payload)
+	s.processStatusFanOut(ctx, conn, payload)
 
 	targetURL := strings.TrimSpace(conn.WebhookURL)
 	if targetURL == "" {

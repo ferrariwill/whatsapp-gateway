@@ -29,6 +29,8 @@ Credenciais da Meta ficam **apenas no servidor**, nunca no painel por cliente:
 | `META_GLOBAL_TOKEN` | System User Permanent Access Token (conta corporativa WABA) |
 | `META_WABA_ID` | WhatsApp Business Account ID (criação/listagem de templates) |
 | `META_WEBHOOK_VERIFY_TOKEN` | Token de verificação do webhook Meta |
+| `MOTHER_SYSTEM_WEBHOOK_URL` | URL de fallback para repassar respostas inbound (se `systems.webhook_url` estiver vazio). **Não** se aplica a fan-out de status. |
+| `STATUS_CALLBACK_MAX_ATTEMPTS` | Tentativas de callback de status antes de DLQ (default: `8`) |
 | `MONTHLY_MESSAGE_LIMIT` | Limite mensal de disparos por cliente externo (default: `3000`) |
 | `JWT_SECRET` | Sessão do painel administrativo |
 | `DATABASE_URL` | PostgreSQL (Supabase ou local) |
@@ -329,6 +331,74 @@ repasse não chegou a ser gravada (ou se um claim órfão foi reclaimado).
 
 ---
 
+## 3.1 Fan-out de status de entrega (`message.status`)
+
+Quando a Meta envia `statuses[]` (`sent` / `delivered` / `read` / `failed`), o
+Gateway persiste o evento em `message_delivery_events` (idempotente por
+`meta_message_id` + `status` + `timestamp`) e faz POST assíncrono ao callback
+do produto.
+
+**Resolução de URL (sem fallback mother):** `connection.webhook_url` →
+`systems.webhook_url`. Se ambas vazias, o evento é gravado com
+`callback_status=failed` e **não** há POST (não usa `MOTHER_SYSTEM_WEBHOOK_URL`).
+
+**Secret HMAC:** cada conexão tem `webhook_secret` (gerado automaticamente no
+create/update admin se vazio — 32 bytes hex). Nunca logado. Use-o para validar
+o header `X-Gateway-Signature-256`.
+
+### Payload
+
+```
+POST {callback_url}
+Content-Type: application/json
+X-Gateway-Signature-256: sha256=<hex HMAC-SHA256(body, webhook_secret)>
+X-Gateway-Event: message.status
+User-Agent: WhatsAppGateway/1.0
+```
+
+```json
+{
+  "event_type": "message.status",
+  "tenant_id": "45",
+  "product_id": "beleza_web",
+  "system_id": "uuid-da-aplicacao-no-gateway",
+  "meta_message_id": "wamid.HBgLMT...",
+  "recipient": "5511999887766",
+  "status": "delivered",
+  "timestamp": "2026-07-31T12:00:00Z",
+  "errors": []
+}
+```
+
+| Campo | Descrição |
+|---|---|
+| `status` | `sent`, `delivered`, `read` ou `failed` |
+| `errors` | Espelho do `errors[]` Meta quando `status=failed`; senão `[]` |
+| `timestamp` | Timestamp Meta em RFC3339 |
+
+Retries curtos (0 / 200ms / 500ms / 1s); depois agenda `next_retry_at` (1m → 5m
+→ 15m → 1h). Após `STATUS_CALLBACK_MAX_ATTEMPTS` (default 8) → `dlq`.
+4xx do SaaS (exceto 429) vão direto para DLQ após 1 tentativa.
+
+Reprocessar DLQ (admin JWT):
+
+```
+POST /admin/delivery-events/{id}/reprocess
+```
+
+### Consulta de status
+
+```
+GET /v1/messages/{meta_message_id}/status
+X-API-Key: sk_live_...
+```
+
+- `200` — lista de eventos do **seu** `system_id`, ordenada por timestamp Meta
+- `404` — id inexistente em qualquer system
+- `403` — id existe só em outro system (sem vazamento cross-tenant)
+
+---
+
 ## 4. Auditoria de volume (API)
 
 Consulta consumo mensal de um cliente externo (controle de margem / abuso):
@@ -372,6 +442,7 @@ O painel admin exibe o mesmo agrupamento em **Volume de Disparos por Aplicação
 | Método | Rota | Auth | Descrição |
 |---|---|---|---|
 | `POST` | `/v1/messages/send-template` | `X-API-Key` | Dispara template |
+| `GET` | `/v1/messages/{meta_message_id}/status` | `X-API-Key` | Histórico de status de entrega (scoped) |
 | `POST` | `/v1/channels` | `X-API-Key` | Cadastra canal WhatsApp para um cliente externo |
 | `POST` | `/v1/embedded-signup/state` | `X-API-Key` | Emite o state OAuth assinado single-use do Embedded Signup |
 | `POST` | `/v1/templates` | `X-API-Key` | Cria template na Meta (WABA global) |
@@ -380,8 +451,10 @@ O painel admin exibe o mesmo agrupamento em **Volume de Disparos por Aplicação
 | `GET` | `/health` | — | Health check |
 | `GET` | `/login` | — | Painel administrativo |
 | `POST` | `/admin/channels` | JWT (cookie) | Vincula canal via painel |
+| `POST` | `/admin/delivery-events/{id}/reprocess` | JWT (cookie) | Reenvia evento de status em DLQ |
 | `GET` | `/admin/usage/volume` | JWT (cookie) | Fragmento HTML de volume (HTMX) |
 | `GET/POST` | `/webhooks/meta/{phone_number_id}` | Meta | Webhook inbound da Meta |
+| `GET/POST` | `/webhook/whatsapp` | Meta | Webhook unificado (status + inbound) |
 
 ---
 

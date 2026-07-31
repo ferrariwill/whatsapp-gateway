@@ -22,6 +22,7 @@ type WhatsAppConnection struct {
 	PhoneNumberID       string    `json:"phone_number_id" db:"phone_number_id"`
 	AccessToken         string    `json:"-" db:"access_token"`
 	WebhookURL          string    `json:"webhook_url,omitempty" db:"webhook_url"`
+	WebhookSecret       string    `json:"-" db:"webhook_secret"` // HMAC outbound; nunca logar
 	WhatsAppPhoneNumber string    `json:"whatsapp_phone_number,omitempty" db:"whatsapp_phone_number"`
 	Status              string    `json:"status" db:"status"`
 	CreatedAt           time.Time `json:"created_at" db:"created_at"`
@@ -98,6 +99,48 @@ const (
 	MessageDirectionOutbound MessageDirection = "OUTBOUND"
 	MessageDirectionInbound  MessageDirection = "INBOUND"
 )
+
+// DeliveryStatus é o status normalizado vindo do webhook Meta statuses[].
+type DeliveryStatus string
+
+const (
+	DeliveryStatusSent      DeliveryStatus = "sent"
+	DeliveryStatusDelivered DeliveryStatus = "delivered"
+	DeliveryStatusRead      DeliveryStatus = "read"
+	DeliveryStatusFailed    DeliveryStatus = "failed"
+)
+
+// CallbackStatus é o estado do fan-out HTTP do evento de status ao produto.
+type CallbackStatus string
+
+const (
+	CallbackStatusPending  CallbackStatus = "pending"
+	CallbackStatusRelaying CallbackStatus = "relaying"
+	CallbackStatusSent     CallbackStatus = "sent"
+	CallbackStatusFailed   CallbackStatus = "failed"
+	CallbackStatusDLQ      CallbackStatus = "dlq"
+)
+
+// MessageDeliveryEvent persiste um status Meta + o ciclo de vida do callback ao SaaS.
+type MessageDeliveryEvent struct {
+	ID               string         `json:"id" db:"id"`
+	SystemID         string         `json:"system_id" db:"system_id"`
+	ConnectionID     string         `json:"connection_id" db:"connection_id"`
+	TenantID         string         `json:"tenant_id" db:"tenant_id"`
+	ProductID        string         `json:"product_id" db:"product_id"`
+	MetaMessageID    string         `json:"meta_message_id" db:"meta_message_id"`
+	Recipient        string         `json:"recipient" db:"recipient"`
+	Status           DeliveryStatus `json:"status" db:"status"`
+	MetaTimestamp    time.Time      `json:"meta_timestamp" db:"meta_timestamp"`
+	ErrorsJSON       []byte         `json:"errors_json,omitempty" db:"errors_json"`
+	CallbackStatus   CallbackStatus `json:"callback_status" db:"callback_status"`
+	CallbackAttempts int            `json:"callback_attempts" db:"callback_attempts"`
+	LastHTTPStatus   *int           `json:"last_http_status,omitempty" db:"last_http_status"`
+	LastError        string         `json:"last_error,omitempty" db:"last_error"`
+	NextRetryAt      *time.Time     `json:"next_retry_at,omitempty" db:"next_retry_at"`
+	SweepClaimedAt   *time.Time     `json:"sweep_claimed_at,omitempty" db:"sweep_claimed_at"`
+	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
+}
 
 // MessageLog registra tentativas de envio e respostas recebidas por system/cliente externo.
 type MessageLog struct {
