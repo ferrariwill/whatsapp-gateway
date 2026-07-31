@@ -33,9 +33,11 @@ func (s *server) enforceConnectionSpamProtection(
 	w http.ResponseWriter,
 	r *http.Request,
 	conn *model.WhatsAppConnection,
+	audit outboundAttemptAudit,
 ) bool {
 	if conn.Status == model.ConnectionStatusSuspendedSpam ||
 		s.rateLimiter.IsBlacklisted(conn.SystemID, conn.TenantID) {
+		s.auditRateLimitedOutbound(r.Context(), conn, audit, "spam-protection/blocked")
 		writeJSON(w, http.StatusTooManyRequests, errorResponse{
 			Error: "tenant temporarily blocked due to spam protection",
 		})
@@ -46,6 +48,8 @@ func (s *server) enforceConnectionSpamProtection(
 	if result.Allowed {
 		return true
 	}
+
+	s.auditRateLimitedOutbound(r.Context(), conn, audit, "spam-protection/rate-limited")
 
 	if result.TriggerAlert {
 		if err := s.repo.SuspendConnectionForSpam(r.Context(), conn.ID); err != nil {

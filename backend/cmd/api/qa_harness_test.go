@@ -36,13 +36,13 @@ import (
 
 const (
 	qaDefaultAdminDatabaseURL = "postgresql://gateway:gateway@localhost:5433/postgres?sslmode=disable"
-	qaDatabaseName            = "whatsapp_gateway_qa"
 	qaMetaHost                = "graph.facebook.com"
 )
 
 var (
-	qaDB         *sql.DB
-	qaSkipReason string
+	qaDatabaseName = fmt.Sprintf("whatsapp_gateway_qa_%d", os.Getpid())
+	qaDB           *sql.DB
+	qaSkipReason   string
 )
 
 func TestMain(m *testing.M) {
@@ -56,14 +56,14 @@ func TestMain(m *testing.M) {
 	if qaDB != nil {
 		_ = qaDB.Close()
 	}
+	if err := dropQADatabase(); err != nil {
+		log.Printf("QA: cleanup database %s: %v", qaDatabaseName, err)
+	}
 	os.Exit(code)
 }
 
 func setupQADatabase() error {
-	adminURL := strings.TrimSpace(os.Getenv("QA_ADMIN_DATABASE_URL"))
-	if adminURL == "" {
-		adminURL = qaDefaultAdminDatabaseURL
-	}
+	adminURL := qaAdminDatabaseURL()
 
 	testURL, err := replaceDatabaseName(adminURL, qaDatabaseName)
 	if err != nil {
@@ -109,6 +109,25 @@ func setupQADatabase() error {
 	return nil
 }
 
+func qaAdminDatabaseURL() string {
+	if value := strings.TrimSpace(os.Getenv("QA_ADMIN_DATABASE_URL")); value != "" {
+		return value
+	}
+	return qaDefaultAdminDatabaseURL
+}
+
+func dropQADatabase() error {
+	admin, err := sql.Open("pgx", qaAdminDatabaseURL())
+	if err != nil {
+		return err
+	}
+	defer admin.Close()
+	return withQATimeout(10*time.Second, func(ctx context.Context) error {
+		_, err := admin.ExecContext(ctx, `DROP DATABASE IF EXISTS `+qaDatabaseName+` WITH (FORCE)`)
+		return err
+	})
+}
+
 func withQATimeout(timeout time.Duration, fn func(context.Context) error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -146,7 +165,7 @@ func requireQADB(t *testing.T) {
 
 func resetQAData(t *testing.T) {
 	t.Helper()
-	_, err := qaDB.Exec(`TRUNCATE message_delivery_events, message_logs, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
+	_, err := qaDB.Exec(`TRUNCATE message_delivery_events, oauth_state_nonces, message_logs, whatsapp_connections, client_channels, systems RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset qa data: %v", err)
 	}
@@ -407,6 +426,7 @@ func qaPostMetaWebhook(t *testing.T, srv *server, rawPayload string) *httptest.R
 // ----------------------------------------------------------------------------
 
 type qaMessageLogRow struct {
+	ID              string
 	SystemID        string
 	ConnectionID    string
 	SistemaOrigem   string
@@ -418,6 +438,7 @@ type qaMessageLogRow struct {
 	Direction       string
 	Category        string
 	Status          string
+	FailureReason   string
 	MetaCost        float64
 	DeliveredAt     *time.Time
 }
@@ -426,10 +447,11 @@ func qaListMessageLogs(t *testing.T) []qaMessageLogRow {
 	t.Helper()
 
 	rows, err := qaDB.Query(`
-		SELECT COALESCE(system_id::text, ''), COALESCE(connection_id::text, ''), COALESCE(sistema_origem, ''),
+		SELECT id::text, COALESCE(system_id::text, ''), COALESCE(connection_id::text, ''), COALESCE(sistema_origem, ''),
 		       COALESCE(external_client_id, ''), COALESCE(meta_message_id, ''), phone_number,
 		       COALESCE(template_name, ''), COALESCE(received_content, ''), direction,
-		       COALESCE(message_category, ''), status, meta_cost, delivered_at
+		       COALESCE(message_category, ''), status, COALESCE(failure_reason, ''),
+		       meta_cost, delivered_at
 		FROM message_logs
 		ORDER BY created_at ASC, id ASC
 	`)
@@ -442,9 +464,9 @@ func qaListMessageLogs(t *testing.T) []qaMessageLogRow {
 	for rows.Next() {
 		var row qaMessageLogRow
 		if err := rows.Scan(
-			&row.SystemID, &row.ConnectionID, &row.SistemaOrigem, &row.TenantID, &row.MetaMessageID,
+			&row.ID, &row.SystemID, &row.ConnectionID, &row.SistemaOrigem, &row.TenantID, &row.MetaMessageID,
 			&row.PhoneNumber, &row.TemplateName, &row.ReceivedContent, &row.Direction,
-			&row.Category, &row.Status, &row.MetaCost, &row.DeliveredAt,
+			&row.Category, &row.Status, &row.FailureReason, &row.MetaCost, &row.DeliveredAt,
 		); err != nil {
 			t.Fatalf("scan message log: %v", err)
 		}
@@ -500,6 +522,27 @@ func qaMessageLogStatus(t *testing.T, logID string) string {
 		t.Fatalf("read message log status: %v", err)
 	}
 	return status
+}
+
+func qaMessageLogFailureReason(t *testing.T, logID string) string {
+	t.Helper()
+	var reason sql.NullString
+	if err := qaDB.QueryRow(`SELECT failure_reason FROM message_logs WHERE id = $1`, logID).Scan(&reason); err != nil {
+		t.Fatalf("read failure_reason: %v", err)
+	}
+	if !reason.Valid {
+		return ""
+	}
+	return reason.String
+}
+
+func qaMessageLogInboundPayload(t *testing.T, logID string) []byte {
+	t.Helper()
+	var raw []byte
+	if err := qaDB.QueryRow(`SELECT inbound_payload FROM message_logs WHERE id = $1`, logID).Scan(&raw); err != nil {
+		t.Fatalf("read inbound_payload: %v", err)
+	}
+	return raw
 }
 
 func qaCountMessageLogs(t *testing.T) int {

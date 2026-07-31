@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,6 +40,12 @@ type relayPool struct {
 	tasks         chan relayTask
 	submitTimeout time.Duration
 	taskTimeout   time.Duration
+	workers       int
+	queueCapacity int
+
+	inFlight          atomic.Int64
+	rejectedSaturated atomic.Int64
+	rejectedClosed    atomic.Int64
 
 	baseCtx context.Context
 	cancel  context.CancelFunc
@@ -83,6 +90,8 @@ func newRelayPool(cfg relayPoolConfig) *relayPool {
 		tasks:         make(chan relayTask, cfg.QueueSize),
 		submitTimeout: cfg.SubmitTimeout,
 		taskTimeout:   cfg.TaskTimeout,
+		workers:       cfg.Workers,
+		queueCapacity: cfg.QueueSize,
 		baseCtx:       baseCtx,
 		cancel:        cancel,
 	}
@@ -102,6 +111,8 @@ func (p *relayPool) work() {
 }
 
 func (p *relayPool) run(task relayTask) {
+	p.inFlight.Add(1)
+	defer p.inFlight.Add(-1)
 	ctx, cancel := context.WithTimeout(p.baseCtx, p.taskTimeout)
 	defer cancel()
 	task(ctx)
@@ -125,6 +136,7 @@ func (p *relayPool) Submit(task relayTask) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.stopping {
+		p.rejectedClosed.Add(1)
 		return ErrRelayPoolClosed
 	}
 
@@ -140,6 +152,7 @@ func (p *relayPool) Submit(task relayTask) error {
 	case p.tasks <- task:
 		return nil
 	case <-timer.C:
+		p.rejectedSaturated.Add(1)
 		return ErrRelayPoolSaturated
 	}
 }
@@ -184,6 +197,31 @@ func (p *relayPool) Queued() int {
 		return 0
 	}
 	return len(p.tasks)
+}
+
+// relayPoolStats são métricas de infraestrutura do processo. Não carregam
+// system_id/tenant_id porque o pool é deliberadamente compartilhado.
+type relayPoolStats struct {
+	QueueDepth        int   `json:"queue_depth"`
+	QueueCapacity     int   `json:"queue_capacity"`
+	Workers           int   `json:"workers"`
+	WorkersInFlight   int64 `json:"workers_in_flight"`
+	RejectedSaturated int64 `json:"rejected_saturated"`
+	RejectedClosed    int64 `json:"rejected_closed"`
+}
+
+func (p *relayPool) Stats() relayPoolStats {
+	if p == nil {
+		return relayPoolStats{}
+	}
+	return relayPoolStats{
+		QueueDepth:        len(p.tasks),
+		QueueCapacity:     p.queueCapacity,
+		Workers:           p.workers,
+		WorkersInFlight:   p.inFlight.Load(),
+		RejectedSaturated: p.rejectedSaturated.Load(),
+		RejectedClosed:    p.rejectedClosed.Load(),
+	}
 }
 
 func envInt(key string, fallback int) int {

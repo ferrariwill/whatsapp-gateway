@@ -85,6 +85,12 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if conn.Status == model.ConnectionStatusSuspendedSpam || s.rateLimiter.IsBlacklisted(conn.SystemID, conn.TenantID) {
+		s.auditRateLimitedOutbound(r.Context(), conn, outboundAttemptAudit{
+			AppointmentID: req.AppointmentID,
+			PhoneNumber:   req.PhoneNumber,
+			TemplateName:  req.TemplateName,
+			Variables:     req.Variables,
+		}, "send-notification/blocked")
 		writeJSON(w, http.StatusTooManyRequests, errorResponse{
 			Error: "tenant temporarily blocked due to spam protection",
 		})
@@ -106,6 +112,12 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 
 	result := s.rateLimiter.RecordAttempt(conn.SystemID, conn.TenantID)
 	if !result.Allowed {
+		s.auditRateLimitedOutbound(r.Context(), conn, outboundAttemptAudit{
+			AppointmentID: req.AppointmentID,
+			PhoneNumber:   req.PhoneNumber,
+			TemplateName:  req.TemplateName,
+			Variables:     req.Variables,
+		}, "send-notification/rate-limited")
 		if result.TriggerAlert {
 			if err := s.repo.SuspendConnectionForSpam(r.Context(), conn.ID); err != nil {
 				log.Printf("suspend connection for spam %s/%s: %v", system.Slug, req.TenantID, err)

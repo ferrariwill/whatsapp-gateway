@@ -39,7 +39,6 @@ services:
       META_GLOBAL_TOKEN: ""
       META_WABA_ID: ""
       META_WEBHOOK_VERIFY_TOKEN: "local-meta-verify-token"
-      MOTHER_SYSTEM_WEBHOOK_URL: ""
       DATABASE_URL: "postgresql://gateway:gateway@postgres-local:5432/whatsapp_gateway?sslmode=disable"
     env_file:
       - path: .env

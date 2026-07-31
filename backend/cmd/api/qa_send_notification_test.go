@@ -387,18 +387,30 @@ func TestQASendNotificationSpamSuspensionIsolatesTenants(t *testing.T) {
 		t.Errorf("other system connection status = %q, want ACTIVE", status)
 	}
 
-	// Somente as tentativas aceitas viram log; as 429 não geram registro.
+	// Tentativas aceitas e recusadas são auditadas; rejected não conta como envio.
 	logs := qaListMessageLogs(t)
-	if len(logs) != maxPerMinute+2 {
-		t.Errorf("expected %d message_logs rows (only accepted attempts), got %d", maxPerMinute+2, len(logs))
+	if len(logs) != maxPerMinute+4 {
+		t.Errorf("expected %d message_logs rows (accepted + 2 rejected), got %d", maxPerMinute+4, len(logs))
 	}
 	if stub.CallCount() != maxPerMinute+2 {
 		t.Errorf("expected %d Meta calls, got %d — blocked attempts must not reach Meta", maxPerMinute+2, stub.CallCount())
 	}
-	t.Logf(
-		"observability gap: %d blocked-by-rate-limit attempts produced no message_logs row (only application log lines)",
-		2,
-	)
+	rejectedByConnection := map[string]int{}
+	for _, row := range logs {
+		if row.Status != string(model.MessageStatusRejected) {
+			continue
+		}
+		if row.FailureReason != failureReasonRateLimited {
+			t.Errorf("rejected row failure_reason = %q, want %q", row.FailureReason, failureReasonRateLimited)
+		}
+		rejectedByConnection[row.ConnectionID]++
+	}
+	if rejectedByConnection[abuser.ID] != 2 {
+		t.Errorf("abuser rejected audit rows = %d, want 2", rejectedByConnection[abuser.ID])
+	}
+	if rejectedByConnection[neighbour.ID] != 0 || rejectedByConnection[otherSystem.ID] != 0 {
+		t.Errorf("rejected audit leaked tenants: %+v", rejectedByConnection)
+	}
 }
 
 // TestQASendNotificationConcurrentLoadKeepsTenantIsolation dispara carga
@@ -555,8 +567,14 @@ func TestQASendNotificationBlocksSuspendedConnectionFromDatabase(t *testing.T) {
 	if stub.CallCount() != 0 {
 		t.Errorf("suspended connection must not reach Meta, got %d calls", stub.CallCount())
 	}
-	if count := qaCountMessageLogs(t); count != 0 {
-		t.Errorf("suspended connection wrote %d message_logs rows", count)
+	logs := qaListMessageLogs(t)
+	if len(logs) != 1 {
+		t.Fatalf("suspended connection wrote %d message_logs rows, want one rejected audit", len(logs))
+	}
+	if logs[0].Status != string(model.MessageStatusRejected) ||
+		logs[0].FailureReason != failureReasonRateLimited ||
+		logs[0].ConnectionID != conn.ID {
+		t.Errorf("unexpected rejected audit: %+v", logs[0])
 	}
 }
 

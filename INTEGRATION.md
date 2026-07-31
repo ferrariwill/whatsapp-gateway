@@ -85,6 +85,55 @@ O campo `salon_name` é o rótulo legível do canal (legado no schema; use como 
 | `Content-Type` | `application/json` |
 | `X-API-Key` | `sk_live_xxxxxxxx...` |
 
+### 1.5 Embedded Signup — state OAuth assinado
+
+Para conectar o WhatsApp de um tenant, o Gateway exige um `state` **assinado e de uso único**. Monte-o pelo endpoint abaixo; o formato legado `{slug}_{tenant_id}` é recusado por padrão (`EMBEDDED_SIGNUP_ALLOW_UNSIGNED_STATE=false`) e devolve `state OAuth assinado obrigatório`.
+
+```
+POST /v1/embedded-signup/state
+```
+
+Autenticação: `X-API-Key` da aplicação. O `state` emitido vale para o system dono da chave — não é possível emitir para outra aplicação.
+
+**Body**
+
+| Campo | Tipo | Obrigatório | Descrição |
+|---|---|---|---|
+| `tenant_id` | string | sim | Identificador do tenant no seu SaaS |
+| `sistema_origem` | string | não | Se enviado, precisa ser igual ao slug da aplicação autenticada |
+| `ttl_seconds` | int | não | Validade do state. Padrão **30 min**; valores acima de **2 h** são reduzidos ao teto |
+
+```json
+{
+  "tenant_id": "45",
+  "ttl_seconds": 900
+}
+```
+
+**Resposta (`201 Created`)**
+
+```json
+{
+  "state": "eyJzbHVnIjoi...<assinado>",
+  "expires_at": "2026-07-30T20:00:00Z",
+  "tenant_id": "45",
+  "slug": "beleza_web"
+}
+```
+
+Use `state` como parâmetro do Embedded Signup da Meta. Ele é consumido no callback: um segundo uso, um state expirado ou um tenant divergente falham com `state OAuth inválido, expirado ou já utilizado`.
+
+**Erros**
+
+| Status | Quando |
+|---|---|
+| `400` | body inválido ou `tenant_id` ausente |
+| `401` | `X-API-Key` ausente ou inválida |
+| `403` | `sistema_origem` diferente do slug da aplicação autenticada |
+| `500` | segredo do state (`OAUTH_STATE_SECRET` / `META_APP_SECRET`) não configurado no Gateway |
+
+Os nonces emitidos ficam em `oauth_state_nonces`. O Gateway coleta os expirados periodicamente (`OAUTH_STATE_NONCE_GC_INTERVAL`, padrão 1 h), preservando-os por uma janela de diagnóstico de replay (`OAUTH_STATE_NONCE_RETENTION`, padrão 24 h após o vencimento).
+
 ---
 
 ## 2. Fluxo de disparo (enviar mensagem)
@@ -183,7 +232,7 @@ Quando o usuário toca em um botão ou envia texto, a Meta notifica o Gateway em
 GET|POST /webhooks/meta/{phone_number_id}
 ```
 
-O Gateway identifica a **aplicação** e o **cliente externo** pelo `phone_number_id` do chip e repassa o evento para a `webhook_url` da aplicação (ou `MOTHER_SYSTEM_WEBHOOK_URL`).
+O Gateway identifica a **aplicação** e o **cliente externo** pelo `phone_number_id` do chip e repassa o evento somente para a `webhook_url` da conexão ou da aplicação. Sem destino configurado, a entrega falha explicitamente.
 
 ### Arquitetura
 
@@ -259,7 +308,7 @@ O corpo do replay traz `"replay": true`, a chave idempotente `meta_message_id`
 (a mesma do repasse em tempo real) e as duas chaves de identidade do tenant
 (`tenant_id` e `external_client_id`), porque a linha não guarda por qual
 endpoint o evento entrou. A resolução de destino é a mesma do tempo real:
-webhook da conexão → webhook do system → `MOTHER_SYSTEM_WEBHOOK_URL`.
+webhook da conexão → webhook do system. Não há fallback compartilhado entre tenants.
 
 ```json
 {
@@ -395,6 +444,7 @@ O painel admin exibe o mesmo agrupamento em **Volume de Disparos por Aplicação
 | `POST` | `/v1/messages/send-template` | `X-API-Key` | Dispara template |
 | `GET` | `/v1/messages/{meta_message_id}/status` | `X-API-Key` | Histórico de status de entrega (scoped) |
 | `POST` | `/v1/channels` | `X-API-Key` | Cadastra canal WhatsApp para um cliente externo |
+| `POST` | `/v1/embedded-signup/state` | `X-API-Key` | Emite o state OAuth assinado single-use do Embedded Signup |
 | `POST` | `/v1/templates` | `X-API-Key` | Cria template na Meta (WABA global) |
 | `GET` | `/v1/templates` | `X-API-Key` | Lista status dos templates |
 | `GET` | `/v1/usage/report` | `X-API-Key` | Relatório de volume mensal por cliente externo |

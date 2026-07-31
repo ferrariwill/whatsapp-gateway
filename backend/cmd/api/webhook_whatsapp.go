@@ -17,15 +17,18 @@ import (
 )
 
 type saasWebhookPayload struct {
-	SystemID      string `json:"system_id"`
-	SistemaOrigem string `json:"sistema_origem"`
-	TenantID      string `json:"tenant_id"`
-	MetaMessageID string `json:"meta_message_id,omitempty"`
-	PhoneNumber   string `json:"phone_number"`
-	Text          string `json:"text"`
-	EventType     string `json:"event_type"`
-	Action        string `json:"action,omitempty"`
-	Replay        bool   `json:"replay,omitempty"`
+	SystemID      string           `json:"system_id"`
+	SistemaOrigem string           `json:"sistema_origem"`
+	TenantID      string           `json:"tenant_id"`
+	MetaMessageID string           `json:"meta_message_id,omitempty"`
+	PhoneNumber   string           `json:"phone_number"`
+	Text          string           `json:"text"`
+	EventType     string           `json:"event_type"`
+	Action        string           `json:"action,omitempty"`
+	Media         *inboundMedia    `json:"media,omitempty"`
+	Location      *inboundLocation `json:"location,omitempty"`
+	Reaction      *inboundReaction `json:"reaction,omitempty"`
+	Replay        bool             `json:"replay,omitempty"`
 }
 
 type unifiedMetaWebhookPayload struct {
@@ -132,7 +135,11 @@ func (s *server) processWebhookPayloadAsync(
 
 	targetURL := strings.TrimSpace(conn.WebhookURL)
 	if targetURL == "" {
-		targetURL = strings.TrimSpace(os.Getenv("MOTHER_SYSTEM_WEBHOOK_URL"))
+		if sys, err := s.repo.FindSystemByID(ctx, conn.SystemID); err == nil {
+			targetURL = strings.TrimSpace(sys.WebhookURL)
+		} else if err != nil && !errors.Is(err, repository.ErrSystemNotFound) {
+			log.Printf("lookup system webhook for %s: %v", conn.SystemID, err)
+		}
 	}
 
 	relay := inboundRelay{
@@ -143,16 +150,13 @@ func (s *server) processWebhookPayloadAsync(
 		targetURL:        targetURL,
 		label:            conn.SistemaOrigem + "/" + conn.TenantID,
 		buildPayload: func(event inboundEvent) any {
-			return saasWebhookPayload{
+			payload := saasWebhookPayload{
 				SystemID:      conn.SystemID,
 				SistemaOrigem: conn.SistemaOrigem,
 				TenantID:      conn.TenantID,
-				MetaMessageID: event.id,
-				PhoneNumber:   event.from,
-				Text:          event.text,
-				EventType:     event.eventType,
-				Action:        event.action,
 			}
+			applyInboundEventToSaaSPayload(&payload, event)
+			return payload
 		},
 	}
 
