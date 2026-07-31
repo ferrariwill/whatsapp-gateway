@@ -40,6 +40,8 @@ import (
 	"github.com/whatsappgetway/gateway/internal/security"
 
 	"github.com/whatsappgetway/gateway/internal/service"
+
+	"github.com/whatsappgetway/gateway/internal/templateutil"
 )
 
 type contextKey int
@@ -105,6 +107,8 @@ type sendTemplateRequest struct {
 
 	TemplateName string `json:"template_name"`
 
+	LanguageCode string `json:"language_code,omitempty"`
+
 	Variables []string `json:"variables"`
 }
 
@@ -135,11 +139,12 @@ type createTemplateResponse struct {
 }
 
 type listTemplatesResponse struct {
-	Templates []provider.MetaTemplateResponse `json:"templates"`
+	Templates []catalogTemplateResponse `json:"templates"`
 }
 
 type errorResponse struct {
 	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
 }
 
 func main() {
@@ -252,6 +257,7 @@ func main() {
 	mux.Handle("GET /admin/usage/volume", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminUsageVolume)))
 	mux.Handle("GET /admin/audit/logs", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminAuditLogs)))
 	mux.Handle("GET /admin/metrics/relay", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminRelayMetrics)))
+	mux.Handle("POST /admin/templates/sync", srv.jwtMiddleware(http.HandlerFunc(srv.handleAdminSyncTemplates)))
 
 	mux.HandleFunc("GET /webhook/whatsapp", srv.handleWhatsAppWebhookVerify)
 	mux.HandleFunc("POST /webhook/whatsapp", srv.handleWhatsAppWebhookEvent)
@@ -269,8 +275,9 @@ func main() {
 
 	mux.Handle("POST /v1/messages/send-template", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSendTemplate)))
 
+	mux.Handle("POST /v1/templates/sync", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleSyncTemplates)))
 	mux.Handle("POST /v1/templates", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleCreateTemplate)))
-
+	mux.Handle("GET /v1/templates/{name}", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleGetTemplate)))
 	mux.Handle("GET /v1/templates", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleListTemplates)))
 
 	mux.Handle("GET /v1/usage/report", srv.apiKeyMiddleware(http.HandlerFunc(srv.handleUsageReport)))
@@ -871,6 +878,21 @@ func (s *server) handleSendTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	language := strings.TrimSpace(req.LanguageCode)
+	if language == "" {
+		language = defaultTemplateLanguage
+	}
+	if err := s.validateOutboundTemplate(
+		r.Context(), system.ID, conn.TenantID, req.TemplateName, language, req.Variables, false,
+	); err != nil {
+		if writeTemplateGateError(w, err) {
+			return
+		}
+		log.Printf("validate template for system %s client %s: %v", system.ID, req.ExternalClientID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
+		return
+	}
+
 	withinLimit, err := s.usage.CheckMonthlyLimit(r.Context(), system.ID, req.ExternalClientID)
 	if err != nil {
 		log.Printf("check monthly limit for system %s client %s: %v", system.ID, req.ExternalClientID, err)
@@ -1040,13 +1062,38 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
-
 		log.Printf("create template for system %s: %v", system.ID, err)
 
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: err.Error()})
 
 		return
 
+	}
+
+	now := time.Now().UTC()
+	components, _ := json.Marshal(provider.BuildCreateTemplateComponents(req.TextBody, req.Buttons))
+	if len(components) == 0 {
+		components = []byte("[]")
+	}
+	local := &model.WhatsAppTemplate{
+		SystemID:           system.ID,
+		TenantID:           req.TenantID,
+		ConnectionID:       conn.ID,
+		WabaID:             conn.WabaID,
+		MetaID:             templateID,
+		Name:               req.Name,
+		Language:           defaultTemplateLanguage,
+		Category:           strings.ToUpper(strings.TrimSpace(req.Category)),
+		Status:             model.TemplateStatusPending,
+		ComponentsJSON:     components,
+		ExpectedBodyParams: templateutil.ExpectedBodyParamCount(components),
+		SyncedAt:           &now,
+	}
+	if local.Category == "" {
+		local.Category = "UTILITY"
+	}
+	if err := s.repo.UpsertWhatsAppTemplate(r.Context(), local); err != nil {
+		log.Printf("persist local pending template %s/%s: %v", system.Slug, req.Name, err)
 	}
 
 	writeJSON(w, http.StatusCreated, createTemplateResponse{
@@ -1070,8 +1117,6 @@ func (s *server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	_ = system
-
 	tenantID := strings.TrimSpace(r.URL.Query().Get("tenant_id"))
 
 	if tenantID == "" {
@@ -1093,27 +1138,25 @@ func (s *server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
-
-	templates, err := metaProvider.GetTemplatesStatus(r.Context(), conn.AccessToken, conn.WabaID)
-
+	templates, err := s.repo.ListTemplatesBySystemTenant(r.Context(), system.ID, tenantID)
 	if err != nil {
-
-		log.Printf("list templates for %s/%s: %v", system.Slug, tenantID, err)
-
-		writeJSON(w, http.StatusBadGateway, errorResponse{Error: err.Error()})
-
+		log.Printf("list local templates %s/%s: %v", system.Slug, tenantID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 		return
-
 	}
 
-	if templates == nil {
-
-		templates = []provider.MetaTemplateResponse{}
-
+	out := make([]catalogTemplateResponse, 0, len(templates))
+	for i := range templates {
+		out = append(out, toCatalogTemplateResponse(&templates[i]))
 	}
 
-	writeJSON(w, http.StatusOK, listTemplatesResponse{Templates: templates})
+	syncedAt, syncErr, syncedBy, _ := s.repo.GetConnectionTemplateSyncAudit(r.Context(), conn.ID)
+	writeJSON(w, http.StatusOK, listCatalogTemplatesResponse{
+		Templates:          out,
+		TemplatesSyncedAt:  syncedAt,
+		TemplatesSyncError: syncErr,
+		TemplatesSyncedBy:  syncedBy,
+	})
 
 }
 

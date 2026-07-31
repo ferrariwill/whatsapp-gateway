@@ -131,6 +131,21 @@ func (s *server) handleSendNotification(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	language := strings.TrimSpace(req.LanguageCode)
+	if language == "" {
+		language = defaultTemplateLanguage
+	}
+	if err := s.validateOutboundTemplate(
+		r.Context(), system.ID, req.TenantID, req.TemplateName, language, req.Variables, req.SimpleTemplate,
+	); err != nil {
+		if writeTemplateGateError(w, err) {
+			return
+		}
+		log.Printf("validate template %s/%s: %v", system.Slug, req.TenantID, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal server error"})
+		return
+	}
+
 	metaProvider := provider.NewMetaProvider(s.metaClient, s.metaAPIVer)
 	var metaMessageID string
 	var sendErr error

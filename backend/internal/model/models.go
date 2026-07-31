@@ -25,6 +25,39 @@ type WhatsAppConnection struct {
 	WhatsAppPhoneNumber string    `json:"whatsapp_phone_number,omitempty" db:"whatsapp_phone_number"`
 	Status              string    `json:"status" db:"status"`
 	CreatedAt           time.Time `json:"created_at" db:"created_at"`
+	// Auditoria do catálogo de templates (migration 000017).
+	TemplatesSyncedAt  *time.Time `json:"templates_synced_at,omitempty" db:"templates_synced_at"`
+	TemplatesSyncError string     `json:"templates_sync_error,omitempty" db:"templates_sync_error"`
+	TemplatesSyncedBy  string     `json:"templates_synced_by,omitempty" db:"templates_synced_by"`
+}
+
+// Status possíveis de um template no catálogo local (espelham a Meta em uppercase).
+const (
+	TemplateStatusApproved  = "APPROVED"
+	TemplateStatusPending   = "PENDING"
+	TemplateStatusRejected  = "REJECTED"
+	TemplateStatusPaused    = "PAUSED"
+	TemplateStatusDisabled  = "DISABLED"
+)
+
+// WhatsAppTemplate é a fonte da verdade local após sync com a Graph API.
+type WhatsAppTemplate struct {
+	ID                  string     `json:"id" db:"id"`
+	SystemID            string     `json:"system_id" db:"system_id"`
+	TenantID            string     `json:"tenant_id" db:"tenant_id"`
+	ConnectionID        string     `json:"connection_id,omitempty" db:"connection_id"`
+	WabaID              string     `json:"waba_id" db:"waba_id"`
+	MetaID              string     `json:"meta_id,omitempty" db:"meta_id"`
+	Name                string     `json:"name" db:"name"`
+	Language            string     `json:"language" db:"language"`
+	Category            string     `json:"category,omitempty" db:"category"`
+	Status              string     `json:"status" db:"status"`
+	ComponentsJSON      []byte     `json:"components_json" db:"components_json"`
+	ExpectedBodyParams  int        `json:"expected_body_params" db:"expected_body_params"`
+	QualityScore        string     `json:"quality_score,omitempty" db:"quality_score"`
+	SyncedAt            *time.Time `json:"synced_at,omitempty" db:"synced_at"`
+	CreatedAt           time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 const (
